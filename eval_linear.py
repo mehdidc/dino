@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import sys
 import os
 import argparse
 import json
@@ -29,6 +30,7 @@ import vision_transformer as vits
 
 
 def eval_linear(args):
+    os.makedirs(args.output_dir, exist_ok=True)
     utils.init_distributed_mode(args)
     print("git:\n  {}\n".format(utils.get_sha()))
     print("\n".join("%s: %s" % (k, str(v)) for k, v in sorted(dict(vars(args)).items())))
@@ -68,31 +70,39 @@ def eval_linear(args):
         pth_transforms.ToTensor(),
         pth_transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
     ])
-    dataset_val = datasets.ImageFolder(os.path.join(args.data_path, "val"), transform=val_transform)
-    val_loader = torch.utils.data.DataLoader(
-        dataset_val,
-        batch_size=args.batch_size_per_gpu,
-        num_workers=args.num_workers,
-        pin_memory=True,
-    )
-
-    if args.evaluate:
-        utils.load_pretrained_linear_weights(linear_classifier, args.arch, args.patch_size)
-        test_stats = validate_network(val_loader, model, linear_classifier, args.n_last_blocks, args.avgpool_patchtokens)
-        print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
-        return
-
     train_transform = pth_transforms.Compose([
         pth_transforms.RandomResizedCrop(224),
         pth_transforms.RandomHorizontalFlip(),
         pth_transforms.ToTensor(),
         pth_transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
     ])
-    dataset_train = datasets.ImageFolder(os.path.join(args.data_path, "train"), transform=train_transform)
+    if args.dataset == "image_folder":
+        dataset_train = datasets.ImageFolder(os.path.join(args.data_path, "train"), transform=train_transform)
+        dataset_val = datasets.ImageFolder(os.path.join(args.data_path, "val"), transform=val_transform)
+    elif args.dataset in ("caffe_lmdb",):
+        from caffe_lmdb import CaffeLMDB
+        dataset_train = CaffeLMDB(os.path.join(args.data_path, "train"), transform=train_transform)
+        dataset_val = CaffeLMDB(os.path.join(args.data_path, "val"), transform=val_transform)
+    else:
+        raise ValueError(args.dataset)
+    if args.evaluate:
+        utils.load_pretrained_linear_weights(linear_classifier, args.arch, args.patch_size)
+        test_stats = validate_network(val_loader, model, linear_classifier, args.n_last_blocks, args.avgpool_patchtokens)
+        print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
+        return
+
+
+
     sampler = torch.utils.data.distributed.DistributedSampler(dataset_train)
     train_loader = torch.utils.data.DataLoader(
         dataset_train,
         sampler=sampler,
+        batch_size=args.batch_size_per_gpu,
+        num_workers=args.num_workers,
+        pin_memory=True,
+    )
+    val_loader = torch.utils.data.DataLoader(
+        dataset_val,
         batch_size=args.batch_size_per_gpu,
         num_workers=args.num_workers,
         pin_memory=True,
@@ -107,7 +117,6 @@ def eval_linear(args):
         weight_decay=0, # we do not apply weight decay
     )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, args.epochs, eta_min=0)
-
     # Optionally resume from a checkpoint
     to_restore = {"epoch": 0, "best_acc": 0.}
     utils.restart_from_checkpoint(
@@ -259,6 +268,7 @@ if __name__ == '__main__':
         help="""Whether ot not to concatenate the global average pooled features to the [CLS] token.
         We typically set this to False for ViT-Small and to True with ViT-Base.""")
     parser.add_argument('--arch', default='vit_small', type=str, help='Architecture')
+    parser.add_argument('--dataset', default='image_folder', type=str, help='Architecture')
     parser.add_argument('--patch_size', default=16, type=int, help='Patch resolution of the model.')
     parser.add_argument('--pretrained_weights', default='', type=str, help="Path to pretrained weights to evaluate.")
     parser.add_argument("--checkpoint_key", default="teacher", type=str, help='Key to use in the checkpoint (example: "teacher")')

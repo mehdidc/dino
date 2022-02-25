@@ -465,37 +465,30 @@ def setup_for_distributed(is_master):
 
 
 def init_distributed_mode(args):
-    # launched with torch.distributed.launch
-    if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
-        args.rank = int(os.environ["RANK"])
-        args.world_size = int(os.environ['WORLD_SIZE'])
-        args.gpu = int(os.environ['LOCAL_RANK'])
-    # launched with submitit on a slurm cluster
-    elif 'SLURM_PROCID' in os.environ:
+    if 'SLURM_PROCID' in os.environ:
         args.rank = int(os.environ['SLURM_PROCID'])
-        args.gpu = args.rank % torch.cuda.device_count()
-    # launched naively with `python main_dino.py`
-    # we manually add MASTER_ADDR and MASTER_PORT to env variables
-    elif torch.cuda.is_available():
-        print('Will run the code on one GPU.')
-        args.rank, args.gpu, args.world_size = 0, 0, 1
-        os.environ['MASTER_ADDR'] = '127.0.0.1'
-        os.environ['MASTER_PORT'] = '29500'
+        args.world_size =  int(os.getenv("SLURM_NTASKS"))
+        address = os.getenv("SLURM_LAUNCH_NODE_IPADDR")
+        # port = "29500"
+        port = "12345"
+        os.environ["MASTER_ADDR"] = address
+        os.environ["MASTER_PORT"] = port
+        args.gpu = int(os.environ['SLURM_LOCALID'])
+        print(args.rank, args.world_size, args.gpu)
     else:
-        print('Does not support training without GPU.')
-        sys.exit(1)
+        print('Not using distributed mode')
+        args.distributed = False
+        return
 
-    dist.init_process_group(
-        backend="nccl",
-        init_method=args.dist_url,
-        world_size=args.world_size,
-        rank=args.rank,
-    )
+    args.distributed = True
 
     torch.cuda.set_device(args.gpu)
+    args.dist_backend = 'nccl'
     print('| distributed init (rank {}): {}'.format(
         args.rank, args.dist_url), flush=True)
-    dist.barrier()
+    torch.distributed.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
+                                         world_size=args.world_size, rank=args.rank)
+    torch.distributed.barrier()
     setup_for_distributed(args.rank == 0)
 
 

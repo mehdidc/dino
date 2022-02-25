@@ -19,6 +19,7 @@ import time
 import math
 import json
 from pathlib import Path
+import wds
 
 import numpy as np
 from PIL import Image
@@ -42,6 +43,7 @@ def get_args_parser():
     parser = argparse.ArgumentParser('DINO', add_help=False)
 
     # Model parameters
+    parser.add_argument('--dataset', default='image_folder', type=str, choices=['image_folder', 'wds', 'caffe_lmdb', 'caffe_lmdb_multiple'])
     parser.add_argument('--arch', default='vit_small', type=str,
         choices=['vit_tiny', 'vit_small', 'vit_base', 'xcit', 'deit_tiny', 'deit_small'] \
                 + torchvision_archs + torch.hub.list("facebookresearch/xcit:main"),
@@ -128,6 +130,18 @@ def get_args_parser():
     parser.add_argument("--local_rank", default=0, type=int, help="Please ignore and do not set this argument.")
     return parser
 
+class DataLoaderWithLen:
+    
+
+    def __init__(self, dataloader, nb_batches):
+        self.dataloader = dataloader
+        self.nb_batches = nb_batches
+
+    def __iter__(self):
+        yield from self.dataloader
+
+    def __len__(self):
+        return self.nb_batches_
 
 def train_dino(args):
     utils.init_distributed_mode(args)
@@ -142,18 +156,49 @@ def train_dino(args):
         args.local_crops_scale,
         args.local_crops_number,
     )
-    dataset = datasets.ImageFolder(args.data_path, transform=transform)
-    sampler = torch.utils.data.DistributedSampler(dataset, shuffle=True)
-    data_loader = torch.utils.data.DataLoader(
-        dataset,
-        sampler=sampler,
-        batch_size=args.batch_size_per_gpu,
-        num_workers=args.num_workers,
-        pin_memory=True,
-        drop_last=True,
-    )
-    print(f"Data loaded: there are {len(dataset)} images.")
+    if args.dataset == "image_folder":
+        dataset = datasets.ImageFolder(args.data_path, transform=transform)
+        sampler = torch.utils.data.DistributedSampler(dataset, shuffle=True)
+        data_loader = torch.utils.data.DataLoader(
+            dataset,
+            sampler=sampler,
+            batch_size=args.batch_size_per_gpu,
+            num_workers=args.num_workers,
+            pin_memory=True,
+            drop_last=True,
+        )
+    elif args.dataset in ("caffe_lmdb", "caffe_lmdb_multiple"):
+        from caffe_lmdb import CaffeLMDBMultiple
+        from glob import glob
 
+        if args.dataset == "caffe_lmdb":
+            paths = [args.data_path]
+        else:
+            paths = glob(os.path.join(args.data_path, "*"))
+
+        dataset = CaffeLMDBMultiple(paths, transform=transform)
+        sampler = torch.utils.data.DistributedSampler(dataset, shuffle=True)
+        data_loader = torch.utils.data.DataLoader(
+            dataset,
+            sampler=sampler,
+            batch_size=args.batch_size_per_gpu,
+            num_workers=args.num_workers,
+            pin_memory=True,
+            drop_last=True,
+        )
+
+    elif args.dataset == "wds":
+        import wds
+        class wds_args:
+            distributed = args.distributed
+            batch_size = args.batch_size
+            train_data = args.root
+            workers = args.workers
+            world_size = args.world_size
+            rank = args.rank
+        data_loader = wds.get_wds_dataset(wds_args, transform, True)
+        data_loader = DataLoaderWithLen(data_loader, data_loader.num_batches)
+    print(f"Data loaded: there are {len(dataset)} images.")
     # ============ building student and teacher networks ... ============
     # we changed the name DeiT-S for ViT-S to avoid confusions
     args.arch = args.arch.replace("deit", "vit")
@@ -267,7 +312,10 @@ def train_dino(args):
     start_time = time.time()
     print("Starting DINO training !")
     for epoch in range(start_epoch, args.epochs):
-        data_loader.sampler.set_epoch(epoch)
+        if args.dataset == "wds":
+            os.environ['WDS_EPOCH'] = str(epoch)
+        else:
+            data_loader.sampler.set_epoch(epoch)
 
         # ============ training one epoch of DINO ... ============
         train_stats = train_one_epoch(student, teacher, teacher_without_ddp, dino_loss,
