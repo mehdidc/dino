@@ -26,6 +26,9 @@ from webdataset.shardlists import IterableDataset, Composable, ShardSample, Simp
 
 from distributed import world_info_from_env
 
+def tokenizer(x):
+    return x
+
 try:
     import horovod.torch as hvd
 except ImportError:
@@ -276,31 +279,35 @@ def filter_no_caption(sample):
     return 'txt' in sample
 
 
-def get_wds_dataset(args, preprocess_img, is_train):
+def get_wds_dataset(args, preprocess_img, is_train, num_batches=None):
     input_shards = args.train_data if is_train else args.val_data
     assert input_shards is not None
-
     # The following code is adapted from https://github.com/tmbdev/webdataset-examples/blob/master/main-wds.py
     num_samples, num_shards = get_dataset_size(input_shards)
-    if is_train and args.distributed:
-        max_shards_per_node = math.ceil(num_shards / args.world_size)
-        num_samples = args.world_size * (num_samples * max_shards_per_node // num_shards)
-        num_batches = num_samples // (args.batch_size * args.world_size)
-        num_samples = num_batches * args.batch_size * args.world_size
-    else:
-        num_batches = num_samples // args.batch_size
+    if num_batches is None:
+        if is_train and args.distributed:
+            max_shards_per_node = math.ceil(num_shards / args.world_size)
+            num_samples = args.world_size * (num_samples * max_shards_per_node // num_shards)
+            num_batches = num_samples // (args.batch_size * args.world_size)
+            num_samples = num_batches * args.batch_size * args.world_size
+        else:
+            num_batches = num_samples // args.batch_size
     shardlist = DistShardList(
         input_shards,
         epoch_shuffle=is_train,
         split_by_node=is_train  # NOTE: we do eval on a single gpu.
     )
+    def group(data):
+        for sample in data:
+            yield tuple(sample["image"]) + tuple([sample["text"]])
+
     dataset = (
         wds.WebDataset(shardlist)
         .select(filter_no_caption)
         .decode("pil", handler=wds.ignore_and_continue)
         .rename(image="jpg;png", text="txt")
         .map_dict(image=preprocess_img, text=preprocess_txt)
-        .to_tuple("image", "text")
+        .then(group)
         .batched(args.batch_size, partial=not is_train or not args.distributed)
     )
     dataloader = wds.WebLoader(

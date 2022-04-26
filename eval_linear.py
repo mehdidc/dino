@@ -24,7 +24,7 @@ import torch.backends.cudnn as cudnn
 from torchvision import datasets
 from torchvision import transforms as pth_transforms
 from torchvision import models as torchvision_models
-
+import fewshot
 import utils
 import vision_transformer as vits
 
@@ -59,7 +59,7 @@ def eval_linear(args):
     utils.load_pretrained_weights(model, args.pretrained_weights, args.checkpoint_key, args.arch, args.patch_size)
     print(f"Model {args.arch} built.")
 
-    linear_classifier = LinearClassifier(embed_dim, num_labels=args.num_labels)
+    linear_classifier = LinearClassifier(embed_dim, num_labels=args.nb_classes, batch_norm=args.batch_norm)
     linear_classifier = linear_classifier.cuda()
     linear_classifier = nn.parallel.DistributedDataParallel(linear_classifier, device_ids=[args.gpu])
 
@@ -85,6 +85,14 @@ def eval_linear(args):
         dataset_val = CaffeLMDB(os.path.join(args.data_path, "val"), transform=val_transform)
     else:
         raise ValueError(args.dataset)
+
+    if args.shots:
+        print("Few shot", args.shots)
+        indices = fewshot.find_fewshot_indices(dataset_train, args.shots)
+        dataset_train = torch.utils.data.Subset(dataset_train, indices)
+
+
+
     if args.evaluate:
         utils.load_pretrained_linear_weights(linear_classifier, args.arch, args.patch_size)
         test_stats = validate_network(val_loader, model, linear_classifier, args.n_last_blocks, args.avgpool_patchtokens)
@@ -245,17 +253,21 @@ def validate_network(val_loader, model, linear_classifier, n, avgpool):
 
 class LinearClassifier(nn.Module):
     """Linear layer to train on top of frozen features"""
-    def __init__(self, dim, num_labels=1000):
+    def __init__(self, dim, num_labels=1000, batch_norm=False):
         super(LinearClassifier, self).__init__()
         self.num_labels = num_labels
         self.linear = nn.Linear(dim, num_labels)
         self.linear.weight.data.normal_(mean=0.0, std=0.01)
         self.linear.bias.data.zero_()
+        self.batch_norm = batch_norm
+        if batch_norm:
+            self.bn = torch.nn.BatchNorm1d(dim, affine=False, eps=1e-6)
 
     def forward(self, x):
         # flatten
         x = x.view(x.size(0), -1)
-
+        if self.batch_norm:
+            x = self.bn(x)
         # linear layer
         return self.linear(x)
 
@@ -285,7 +297,11 @@ if __name__ == '__main__':
     parser.add_argument('--num_workers', default=10, type=int, help='Number of data loading workers per GPU.')
     parser.add_argument('--val_freq', default=1, type=int, help="Epoch frequency for validation.")
     parser.add_argument('--output_dir', default=".", help='Path to save logs and checkpoints')
-    parser.add_argument('--num_labels', default=1000, type=int, help='Number of labels for linear classifier')
+    parser.add_argument('--nb_classes', default=1000, type=int, help='Number of labels for linear classifier')
     parser.add_argument('--evaluate', dest='evaluate', action='store_true', help='evaluate model on validation set')
+    parser.add_argument('--batch_norm', dest='batch_norm', action='store_true', help='evaluate model on validation set')
+    parser.add_argument('--label_type', default="int", type=str, help='Number of labels for linear classifier')
+    parser.add_argument('--shots', default=0, type=int)
+
     args = parser.parse_args()
     eval_linear(args)

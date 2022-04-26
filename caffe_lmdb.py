@@ -108,12 +108,21 @@ class CaffeLMDBMultiple:
         self._transform = new_transform
 
     def __getitem__(self, idx):
+        # dataset_idx = idx // (self.nb//len(self.datasets))
+        # found = False
+        # while not found:
+            # start, end = self.dataset_inds[dataset_idx]
+            # if idx < start:
+                # dataset_idx += 1
+            # elif idx >= end:
+                # dataset_idx -= 1
+            # else:
+                 # found = True
         dataset_idx = None
         for i, (start, end) in enumerate(self.dataset_inds):
             if idx >= start and idx < end:
                 dataset_idx = i
                 break
-        # raise ValueError(f"DATASET {dataset_idx}, {idx}, {self.nb}")
         dataset = self.datasets[dataset_idx]
         start, end = self.dataset_inds[dataset_idx]
         offset = idx - start

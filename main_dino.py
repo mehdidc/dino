@@ -34,6 +34,7 @@ from torchvision import models as torchvision_models
 import utils
 import vision_transformer as vits
 from vision_transformer import DINOHead
+from lamb import Lamb
 
 torchvision_archs = sorted(name for name in torchvision_models.__dict__
     if name.islower() and not name.startswith("__")
@@ -103,7 +104,7 @@ def get_args_parser():
     parser.add_argument('--min_lr', type=float, default=1e-6, help="""Target LR at the
         end of optimization. We use a cosine LR schedule with linear warmup.""")
     parser.add_argument('--optimizer', default='adamw', type=str,
-        choices=['adamw', 'sgd', 'lars'], help="""Type of optimizer. We recommend using adamw with ViTs.""")
+        choices=['adamw', 'sgd', 'lars', 'lamb'], help="""Type of optimizer. We recommend using adamw with ViTs.""")
     parser.add_argument('--drop_path_rate', type=float, default=0.1, help="stochastic depth rate")
 
     # Multi-crop parameters
@@ -122,12 +123,15 @@ def get_args_parser():
     parser.add_argument('--data_path', default='/path/to/imagenet/train/', type=str,
         help='Please specify path to the ImageNet training data.')
     parser.add_argument('--output_dir', default=".", type=str, help='Path to save logs and checkpoints.')
-    parser.add_argument('--saveckp_freq', default=20, type=int, help='Save checkpoint every x epochs.')
+    parser.add_argument('--saveckp_freq', default=21, type=int, help='Save checkpoint every x epochs.')
     parser.add_argument('--seed', default=0, type=int, help='Random seed.')
-    parser.add_argument('--num_workers', default=10, type=int, help='Number of data loading workers per GPU.')
+    parser.add_argument('--num_workers', default=11, type=int, help='Number of data loading workers per GPU.')
     parser.add_argument("--dist_url", default="env://", type=str, help="""url used to set up
         distributed training; see https://pytorch.org/docs/stable/distributed.html""")
     parser.add_argument("--local_rank", default=0, type=int, help="Please ignore and do not set this argument.")
+    parser.add_argument("--num_batches", default=0, type=int, help="Please ignore and do not set this argument.")
+    parser.add_argument("--num_samples_per_epoch", default=0, type=int, help="Please ignore and do not set this argument.")
+    parser.add_argument("--label_type", default="int", type=str, help="Please ignore and do not set this argument.")
     return parser
 
 class DataLoaderWithLen:
@@ -141,7 +145,7 @@ class DataLoaderWithLen:
         yield from self.dataloader
 
     def __len__(self):
-        return self.nb_batches_
+        return self.nb_batches
 
 def train_dino(args):
     utils.init_distributed_mode(args)
@@ -176,8 +180,14 @@ def train_dino(args):
         else:
             paths = glob(os.path.join(args.data_path, "*"))
 
-        dataset = CaffeLMDBMultiple(paths, transform=transform)
-        sampler = torch.utils.data.DistributedSampler(dataset, shuffle=True)
+        dataset = CaffeLMDBMultiple(paths, transform=transform, label_type=args.label_type)
+        if args.num_batches:
+            num_samples = args.num_batches * args.batch_size_per_gpu
+            sampler = torch.utils.data.RandomSampler(dataset, replacement=True, num_samples=num_samples)
+        elif args.num_samples_per_epoch:
+            sampler = torch.utils.data.RandomSampler(dataset, replacement=True, num_samples=args.num_samples_per_epoch//args.world_size)
+        else:
+            sampler = torch.utils.data.DistributedSampler(dataset, shuffle=True)
         data_loader = torch.utils.data.DataLoader(
             dataset,
             sampler=sampler,
@@ -185,20 +195,22 @@ def train_dino(args):
             num_workers=args.num_workers,
             pin_memory=True,
             drop_last=True,
+            # persistent_workers=True,
         )
 
     elif args.dataset == "wds":
         import wds
         class wds_args:
             distributed = args.distributed
-            batch_size = args.batch_size
-            train_data = args.root
-            workers = args.workers
+            batch_size = args.batch_size_per_gpu
+            train_data = args.data_path
+            workers = args.num_workers
             world_size = args.world_size
             rank = args.rank
-        data_loader = wds.get_wds_dataset(wds_args, transform, True)
+        data_loader = wds.get_wds_dataset(wds_args, transform, True, num_batches=args.num_batches if args.num_batches else None).dataloader
         data_loader = DataLoaderWithLen(data_loader, data_loader.num_batches)
-    print(f"Data loaded: there are {len(dataset)} images.")
+    if args.dataset != "wds":
+        print(f"Data loaded: there are {len(dataset)} images.")
     # ============ building student and teacher networks ... ============
     # we changed the name DeiT-S for ViT-S to avoid confusions
     args.arch = args.arch.replace("deit", "vit")
@@ -272,6 +284,8 @@ def train_dino(args):
         optimizer = torch.optim.AdamW(params_groups)  # to use with ViTs
     elif args.optimizer == "sgd":
         optimizer = torch.optim.SGD(params_groups, lr=0, momentum=0.9)  # lr is set by scheduler
+    elif args.optimizer == "lamb":
+        optimizer = Lamb(params_groups, lr=0)  # lr is set by scheduler
     elif args.optimizer == "lars":
         optimizer = utils.LARS(params_groups)  # to use with convnet and large batches
     # for mixed precision training
@@ -315,7 +329,8 @@ def train_dino(args):
         if args.dataset == "wds":
             os.environ['WDS_EPOCH'] = str(epoch)
         else:
-            data_loader.sampler.set_epoch(epoch)
+            if hasattr(data_loader.sampler, "set_epoch"):
+                data_loader.sampler.set_epoch(epoch)
 
         # ============ training one epoch of DINO ... ============
         train_stats = train_one_epoch(student, teacher, teacher_without_ddp, dino_loss,
@@ -351,7 +366,22 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
                     fp16_scaler, args):
     metric_logger = utils.MetricLogger(delimiter="  ")
     header = 'Epoch: [{}/{}]'.format(epoch, args.epochs)
-    for it, (images, _) in enumerate(metric_logger.log_every(data_loader, 10, header)):
+    for it, data in enumerate(metric_logger.log_every(data_loader, 10, header)):
+
+        if args.dataset == "wds":
+            images = data[0:-1]
+        else:
+            images, _ = data
+        ### DEBUG
+        # if utils.is_main_process():
+            # import torchvision
+            # mean = torch.Tensor([0.485, 0.456, 0.406]).view(1,-1,1,1)
+            # std = torch.Tensor([0.229, 0.224, 0.225]).view(1,-1,1,1)
+            # for i, image in enumerate(images):
+                # im = image*std+mean
+                # print(im.shape)
+                # torchvision.utils.save_image(im[0], f"image{i}.png")
+        ###
         # update weight decay and learning rate according to their schedule
         it = len(data_loader) * epoch + it  # global training iteration
         for i, param_group in enumerate(optimizer.param_groups):
@@ -360,6 +390,12 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
                 param_group["weight_decay"] = wd_schedule[it]
 
         # move images to gpu
+        # if args.dataset == "wds":
+            # nb_views = len(images[0])
+            # bs = len(images)
+            # # images = [ torch.stack([images[j][i] for j in range(bs)]).cuda(non_blocking=True) for i in range(nb_views)]
+        # else:
+            # images = [im.cuda(non_blocking=True) for im in images]
         images = [im.cuda(non_blocking=True) for im in images]
         # teacher and student forward passes + compute dino loss
         with torch.cuda.amp.autocast(fp16_scaler is not None):
@@ -465,7 +501,7 @@ class DINOLoss(nn.Module):
 
 
 class DataAugmentationDINO(object):
-    def __init__(self, global_crops_scale, local_crops_scale, local_crops_number):
+    def __init__(self, global_crops_scale, local_crops_scale, local_crops_number, stack=False):
         flip_and_color_jitter = transforms.Compose([
             transforms.RandomHorizontalFlip(p=0.5),
             transforms.RandomApply(
@@ -502,6 +538,7 @@ class DataAugmentationDINO(object):
             utils.GaussianBlur(p=0.5),
             normalize,
         ])
+        self.stack = stack
 
     def __call__(self, image):
         crops = []
@@ -509,7 +546,10 @@ class DataAugmentationDINO(object):
         crops.append(self.global_transfo2(image))
         for _ in range(self.local_crops_number):
             crops.append(self.local_transfo(image))
-        return crops
+        if self.stack:
+            return [torch.cat(crops[0:2], dim=0), torch.cat(crops[2:], dim=0)]
+        else:
+            return crops
 
 
 if __name__ == '__main__':
