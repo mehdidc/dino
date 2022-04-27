@@ -46,10 +46,10 @@ def train(
     epochs:int=None,
 ):
     os.makedirs(folder, exist_ok=True)
-    nb_runs = len(glob(os.path.join(folder, "out_*")))
-    run_id = nb_runs + 1
-    output = f"{folder}/out_{run_id}"
-    error = f"{folder}/err_{run_id}"
+    #nb_runs = len(glob(os.path.join(folder, "out_*")))
+    #run_id = nb_runs + 1
+    output = f"{folder}/slurm-%j.out"
+    error = f"{folder}/slurm-%j.err"
     script = f"scripts/run_{machine}_ddp.sh main_dino.py"
     data = datasets[dataset]
     hypers = templates[template]
@@ -104,8 +104,8 @@ def linear_probe(
         weights = os.path.join(folder, "checkpoint.pth")
 
     folder = os.path.join(folder, f"eval_linear_{dataset}{fs}")
-    output = f"{folder}/out"
-    error = f"{folder}/err"
+    output = f"{folder}/slurm-%j.out"
+    error = f"{folder}/slurm-%j.err"
     bn = "--batch_norm" if batch_norm else ""
     os.makedirs(folder, exist_ok=True)
     cmd = f"sbatch --gres=gpu:{gpus_per_node} -t {t} --output {output} --error {error} -N {nodes} -n {nodes*gpus_per_node} {script} {data}  --arch {arch} --patch_size {patch_size} --batch_size_per_gpu {batch_size_per_gpu} --pretrained_weights {weights} --output_dir {folder} --n_last_blocks {n_last_blocks} --avgpool_patchtokens {avgpool_patchtokens} --epochs {epochs} {bn}"
@@ -134,7 +134,7 @@ def fast_linear_probe(
     os.makedirs(target, exist_ok=True)
 
     script = f"scripts/run_{machine}_ddp.sh eval_sklearn.py"
-    cmd = f'sbatch --output {target}/out --error {target}/err -N 1 -n 1 {script}  --arch {arch} --patch_size {patch_size} --pretrained_weights {folder} {data} --batch_size_per_gpu {batch_size_per_gpu} --log {target}/log.txt --shots {shots} --sklearn_model {sklearn_model} --alpha {alpha} --nb_repeats {nb_repeats} --n_last_blocks {n_last_blocks} --avgpool_patchtokens {avgpool_patchtokens}'
+    cmd = f'sbatch --output {target}/slurm-%j.out --error {target}/slurm-%j.err  -N 1 -n 1 {script}  --arch {arch} --patch_size {patch_size} --pretrained_weights {folder} {data} --batch_size_per_gpu {batch_size_per_gpu} --log {target}/log.txt --shots {shots} --sklearn_model {sklearn_model} --alpha {alpha} --nb_repeats {nb_repeats} --n_last_blocks {n_last_blocks} --avgpool_patchtokens {avgpool_patchtokens}'
     print(cmd)
     call(cmd, shell=True)
 

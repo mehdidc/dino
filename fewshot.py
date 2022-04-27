@@ -90,6 +90,17 @@ def find_fewshot_indices(dataset, n_shots, random_state=None):
   print(all_indices)
   return all_indices
 
+def find_fewshot_indices_image_folder(dataset, n_shots):
+  inds = defaultdict(list)
+  for idx, (path, target) in enumerate(dataset.samples):
+      inds[target].append(idx)
+  
+  all_inds = []
+  for cl, inds in inds.items(): 
+    random.shuffle(inds)
+    all_inds.extend(inds[:n_shots])
+  return all_inds
+
 if __name__ == "__main__":
   dataset = tv.datasets.ImageFolder(sys.argv[2], preprocess)
   all_indices = find_fewshot_indices(dataset, int(sys.argv[1]))
