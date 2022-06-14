@@ -207,7 +207,10 @@ def train_dino(args):
             workers = args.num_workers
             world_size = args.world_size
             rank = args.rank
+        if args.num_samples_per_epoch:
+            args.num_batches = args.num_samples_per_epoch // (args.batch_size_per_gpu * args.world_size)
         data_loader = wds.get_wds_dataset(wds_args, transform, True, num_batches=args.num_batches if args.num_batches else None).dataloader
+        print(data_loader.num_batches)
         data_loader = DataLoaderWithLen(data_loader, data_loader.num_batches)
     if args.dataset != "wds":
         print(f"Data loaded: there are {len(dataset)} images.")

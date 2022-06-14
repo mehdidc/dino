@@ -13,7 +13,8 @@ datasets = {
 
 datasets_finetuning = {
     "imagenet1k": '--data_path "/p/scratch/ccstdl/cherti1/imagenet-1K-lmdb" --label_type int --dataset caffe_lmdb --nb_classes 1000',
-    "cifar10": '--data_path datasets/cifar10 --dataset image_folder --nb_classes 10'
+    "cifar10": '--data_path datasets/cifar10 --dataset image_folder --nb_classes 10',
+    "imagenet1k_wds": '--data_path /p/scratch/ccstdl/cherti1/imagenet-1K-webdataset --label_type int --dataset wds --nb_classes 1000 --train_num_samples 1281167 --val_num_samples 50000',
 }
 
 templates = {
@@ -51,6 +52,7 @@ def train(
     epochs:int=None,
     num_workers:int=None,
     saveckp_freq:int=None,
+    num_samples_per_epoch:int=None,
 ):
     os.makedirs(folder, exist_ok=True)
     #nb_runs = len(glob(os.path.join(folder, "out_*")))
@@ -77,12 +79,13 @@ def train(
         hypers["num_workers"] = num_workers
     if saveckp_freq is not None:
         hypers["saveckp_freq"] = saveckp_freq
+    if num_samples_per_epoch is not None:
+        hypers["num_samples_per_epoch"] = num_samples_per_epoch
     def to_str(v):
         if type(v) == list:
             return " ".join(map(str, v))
         else:
             return v
-    
     hypers_str = " ".join(f"--{k} {to_str(v)}" for k, v in hypers.items())
     cmd = f"sbatch --gres=gpu:{gpus_per_node} -t {t} --output {output} --error {error} -N {nodes} -n {nodes*gpus_per_node} {script} {data} {hypers_str} --output_dir {folder}"
     print(cmd)
@@ -103,6 +106,9 @@ def linear_probe(
     n_last_blocks=4,
     avgpool_patchtokens=False,
     batch_norm=False,
+    target:str=None,
+    num_workers=10,
+    lr:float=0.001,
 ):
     hypers = templates[template]
     arch = hypers["arch"]
@@ -112,13 +118,16 @@ def linear_probe(
     script = f"scripts/run_{machine}_ddp.sh eval_linear.py"
     if weights is None:
         weights = os.path.join(folder, "checkpoint.pth")
-
-    folder = os.path.join(folder, f"eval_linear_{dataset}{fs}")
+    
+    if target is not None:
+        folder = target
+    else:
+        folder = os.path.join(folder, f"eval_linear_{dataset}")
     output = f"{folder}/slurm-%j.out"
     error = f"{folder}/slurm-%j.err"
     bn = "--batch_norm" if batch_norm else ""
     os.makedirs(folder, exist_ok=True)
-    cmd = f"sbatch --gres=gpu:{gpus_per_node} -t {t} --output {output} --error {error} -N {nodes} -n {nodes*gpus_per_node} {script} {data}  --arch {arch} --patch_size {patch_size} --batch_size_per_gpu {batch_size_per_gpu} --pretrained_weights {weights} --output_dir {folder} --n_last_blocks {n_last_blocks} --avgpool_patchtokens {avgpool_patchtokens} --epochs {epochs} {bn}"
+    cmd = f"sbatch --gres=gpu:{gpus_per_node} -t {t} --output {output} --error {error} -N {nodes} -n {nodes*gpus_per_node} {script} {data}  --arch {arch} --patch_size {patch_size} --batch_size_per_gpu {batch_size_per_gpu} --pretrained_weights {weights} --output_dir {folder} --n_last_blocks {n_last_blocks} --avgpool_patchtokens {avgpool_patchtokens} --epochs {epochs} {bn} --num_workers {num_workers} --lr {lr}"
     print(cmd)
     call(cmd, shell=True)
 

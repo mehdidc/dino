@@ -64,7 +64,7 @@ def eval_linear(args):
     linear_classifier = nn.parallel.DistributedDataParallel(linear_classifier, device_ids=[args.gpu])
 
     # ============ preparing data ... ============
-    val_transform = pth_transforms.Compose([
+    val_transform    = pth_transforms.Compose([
         pth_transforms.Resize(256, interpolation=3),
         pth_transforms.CenterCrop(224),
         pth_transforms.ToTensor(),
@@ -83,14 +83,38 @@ def eval_linear(args):
         from caffe_lmdb import CaffeLMDB
         dataset_train = CaffeLMDB(os.path.join(args.data_path, "train"), transform=train_transform)
         dataset_val = CaffeLMDB(os.path.join(args.data_path, "val"), transform=val_transform)
+    elif args.dataset == "wds":
+        from data import get_wds_dataset
+        from glob import glob
+        class wds_args:
+            distributed = True
+            batch_size = args.batch_size_per_gpu
+            train_data = glob(f"{args.data_path}/train/**/*.tar")
+            val_data = glob(f"{args.data_path}/valid/**/*.tar")
+            workers = args.num_workers
+            num_batches = None
+            train_num_samples = args.train_num_samples
+            val_num_samples = args.val_num_samples
+            seed = hash((args.seed, utils.get_rank() )) % (2 ** 32)
+            input_col = "jpg"
+            output_col = "cls"
+            label_type = "int" 
+            world_size = utils.get_world_size()
+        train_loader = get_wds_dataset(args=wds_args, preprocess_img=train_transform, preprocess_target=int, is_train=True).dataloader
+        val_loader = get_wds_dataset(args=wds_args, preprocess_img=val_transform, preprocess_target=int, is_train=False).dataloader
+        train_loader = DataLoaderWithLen(train_loader, train_loader.num_batches)
+        val_loader = DataLoaderWithLen(val_loader, val_loader.num_batches)
     else:
-        raise ValueError(args.dataset)
+        from clip_benchmark.datasets.builder import build_dataset
+        dataset_train = build_dataset(args.dataset, transform=train_transform, split="train", root=args.data_path)
+        dataset_val = build_dataset(args.dataset, transform=val_transform, split="test", root=args.data_path)
+    # else:
+        # raise ValueError(args.dataset)
 
     if args.shots:
         print("Few shot", args.shots)
         indices = fewshot.find_fewshot_indices(dataset_train, args.shots)
         dataset_train = torch.utils.data.Subset(dataset_train, indices)
-
 
 
     if args.evaluate:
@@ -99,23 +123,22 @@ def eval_linear(args):
         print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
         return
 
-
-
-    sampler = torch.utils.data.distributed.DistributedSampler(dataset_train)
-    train_loader = torch.utils.data.DataLoader(
-        dataset_train,
-        sampler=sampler,
-        batch_size=args.batch_size_per_gpu,
-        num_workers=args.num_workers,
-        pin_memory=True,
-    )
-    val_loader = torch.utils.data.DataLoader(
-        dataset_val,
-        batch_size=args.batch_size_per_gpu,
-        num_workers=args.num_workers,
-        pin_memory=True,
-    )
-    print(f"Data loaded with {len(dataset_train)} train and {len(dataset_val)} val imgs.")
+    if args.dataset != "wds":
+        sampler = torch.utils.data.distributed.DistributedSampler(dataset_train)
+        train_loader = torch.utils.data.DataLoader(
+            dataset_train,
+            sampler=sampler,
+            batch_size=args.batch_size_per_gpu,
+            num_workers=args.num_workers,
+            pin_memory=True,
+        )
+        val_loader = torch.utils.data.DataLoader(
+            dataset_val,
+            batch_size=args.batch_size_per_gpu,
+            num_workers=args.num_workers,
+            pin_memory=True,
+        )
+        print(f"Data loaded with {len(dataset_train)} train and {len(dataset_val)} val imgs.")
 
     # set optimizer
     optimizer = torch.optim.SGD(
@@ -138,7 +161,10 @@ def eval_linear(args):
     best_acc = to_restore["best_acc"]
 
     for epoch in range(start_epoch, args.epochs):
-        train_loader.sampler.set_epoch(epoch)
+        if hasattr(train_loader, "sampler"):
+            train_loader.sampler.set_epoch(epoch)
+        if args.dataset == "wds":
+            os.environ["WDS_EPOCH"] = str(epoch)
 
         train_stats = train(model, linear_classifier, optimizer, train_loader, epoch, args.n_last_blocks, args.avgpool_patchtokens)
         scheduler.step()
@@ -147,7 +173,7 @@ def eval_linear(args):
                      'epoch': epoch}
         if epoch % args.val_freq == 0 or epoch == args.epochs - 1:
             test_stats = validate_network(val_loader, model, linear_classifier, args.n_last_blocks, args.avgpool_patchtokens)
-            print(f"Accuracy at epoch {epoch} of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
+            print(f"Accuracy at epoch {epoch} of the network on the test images: {test_stats['acc1']:.1f}%")
             best_acc = max(best_acc, test_stats["acc1"])
             print(f'Max accuracy so far: {best_acc:.2f}%')
             log_stats = {**{k: v for k, v in log_stats.items()},
@@ -271,6 +297,18 @@ class LinearClassifier(nn.Module):
         # linear layer
         return self.linear(x)
 
+class DataLoaderWithLen:
+    
+
+    def __init__(self, dataloader, nb_batches):
+        self.dataloader = dataloader
+        self.nb_batches = nb_batches
+
+    def __iter__(self):
+        yield from self.dataloader
+
+    def __len__(self):
+        return self.nb_batches
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser('Evaluation with linear classification on ImageNet')
@@ -301,7 +339,10 @@ if __name__ == '__main__':
     parser.add_argument('--evaluate', dest='evaluate', action='store_true', help='evaluate model on validation set')
     parser.add_argument('--batch_norm', dest='batch_norm', action='store_true', help='evaluate model on validation set')
     parser.add_argument('--label_type', default="int", type=str, help='Number of labels for linear classifier')
+    parser.add_argument('--train_num_samples', default=0, type=int, help='Number of labels for linear classifier')
+    parser.add_argument('--val_num_samples', default=0, type=int, help='Number of labels for linear classifier')
     parser.add_argument('--shots', default=0, type=int)
+    parser.add_argument('--seed', default=0, type=int)
 
     args = parser.parse_args()
     eval_linear(args)
