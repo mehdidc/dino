@@ -46,7 +46,7 @@ def get_args_parser():
     # Model parameters
     parser.add_argument('--dataset', default='image_folder', type=str, choices=['image_folder', 'wds', 'caffe_lmdb', 'caffe_lmdb_multiple'])
     parser.add_argument('--arch', default='vit_small', type=str,
-        choices=['vit_tiny', 'vit_small', 'vit_base', 'xcit', 'deit_tiny', 'deit_small'] \
+        choices=['vit_tiny', 'vit_small', 'vit_base', 'vit_large', 'vit_huge', 'vit_giant', 'vit_gigantic', 'xcit', 'deit_tiny', 'deit_small'] \
                 + torchvision_archs + torch.hub.list("facebookresearch/xcit:main"),
         help="""Name of architecture to train. For quick experiments with ViTs,
         we recommend using vit_tiny or vit_small.""")
@@ -105,6 +105,7 @@ def get_args_parser():
         end of optimization. We use a cosine LR schedule with linear warmup.""")
     parser.add_argument('--optimizer', default='adamw', type=str,
         choices=['adamw', 'sgd', 'lars', 'lamb'], help="""Type of optimizer. We recommend using adamw with ViTs.""")
+    parser.add_argument('--scheduler', default='cosine', type=str)
     parser.add_argument('--drop_path_rate', type=float, default=0.1, help="stochastic depth rate")
 
     # Multi-crop parameters
@@ -132,6 +133,7 @@ def get_args_parser():
     parser.add_argument("--num_batches", default=0, type=int, help="Please ignore and do not set this argument.")
     parser.add_argument("--num_samples_per_epoch", default=0, type=int, help="Please ignore and do not set this argument.")
     parser.add_argument("--label_type", default="int", type=str, help="Please ignore and do not set this argument.")
+    parser.add_argument('--resampled', default=False, type=utils.bool_flag)
     return parser
 
 class DataLoaderWithLen:
@@ -148,8 +150,10 @@ class DataLoaderWithLen:
         return self.nb_batches
 
 def train_dino(args):
+    resampled = args.num_batches or args.num_samples_per_epoch
     utils.init_distributed_mode(args)
-    utils.fix_random_seeds(args.seed)
+    if not  resampled:
+        utils.fix_random_seeds(args.seed)
     print("git:\n  {}\n".format(utils.get_sha()))
     print("\n".join("%s: %s" % (k, str(v)) for k, v in sorted(dict(vars(args)).items())))
     cudnn.benchmark = True
@@ -162,7 +166,15 @@ def train_dino(args):
     )
     if args.dataset == "image_folder":
         dataset = datasets.ImageFolder(args.data_path, transform=transform)
-        sampler = torch.utils.data.DistributedSampler(dataset, shuffle=True)
+        #sampler = torch.utils.data.DistributedSampler(dataset, shuffle=True)
+        if args.num_batches:
+            num_samples = args.num_batches * args.batch_size_per_gpu
+            sampler = torch.utils.data.RandomSampler(dataset, replacement=True, num_samples=num_samples, generator=gen)
+        elif args.num_samples_per_epoch:
+            sampler = torch.utils.data.RandomSampler(dataset, replacement=True, num_samples=args.num_samples_per_epoch//args.world_size)
+        else:
+            sampler = torch.utils.data.DistributedSampler(dataset, shuffle=True)
+
         data_loader = torch.utils.data.DataLoader(
             dataset,
             sampler=sampler,
@@ -209,7 +221,7 @@ def train_dino(args):
             rank = args.rank
         if args.num_samples_per_epoch:
             args.num_batches = args.num_samples_per_epoch // (args.batch_size_per_gpu * args.world_size)
-        data_loader = wds.get_wds_dataset(wds_args, transform, True, num_batches=args.num_batches if args.num_batches else None).dataloader
+        data_loader = wds.get_wds_dataset(wds_args, transform, True, num_batches=args.num_batches if args.num_batches else None, resampled=args.resampled).dataloader
         print(data_loader.num_batches)
         data_loader = DataLoaderWithLen(data_loader, data_loader.num_batches)
     if args.dataset != "wds":
@@ -297,19 +309,22 @@ def train_dino(args):
         fp16_scaler = torch.cuda.amp.GradScaler()
 
     # ============ init schedulers ... ============
-    lr_schedule = utils.cosine_scheduler(
+    scheduler = utils.scheduler[args.scheduler]
+
+    lr_schedule = scheduler(
         args.lr * (args.batch_size_per_gpu * utils.get_world_size()) / 256.,  # linear scaling rule
         args.min_lr,
         args.epochs, len(data_loader),
         warmup_epochs=args.warmup_epochs,
     )
-    wd_schedule = utils.cosine_scheduler(
+    wd_schedule = scheduler(
         args.weight_decay,
         args.weight_decay_end,
-        args.epochs, len(data_loader),
+        args.epochs, 
+        len(data_loader),
     )
     # momentum parameter is increased to 1. during training with a cosine schedule
-    momentum_schedule = utils.cosine_scheduler(args.momentum_teacher, 1,
+    momentum_schedule = scheduler(args.momentum_teacher, 1,
                                                args.epochs, len(data_loader))
     print(f"Loss, optimizer and schedulers ready.")
 

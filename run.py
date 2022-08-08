@@ -6,36 +6,40 @@ from subprocess import call
 machine = open("/etc/FZJ/systemname").read().strip()
 datasets = {
     "imagenet1k": '--data_path "/p/scratch/ccstdl/cherti1/imagenet-1K-lmdb/train" --label_type int --dataset caffe_lmdb',
+    "imagenet1k_wds": '--data_path "datasets/imagenet-1K/webdataset/train" --dataset wds',
+    "imagenet1k_wds_replacement": '--data_path "datasets/imagenet-1K/webdataset/train" --dataset wds --resampled True',
+
     "imagenet21k": '--dataset caffe_lmdb_multiple --data_path datasets/imagenet-21K/lmdb',
+    "imagenet21k_wds": '--dataset wds_lmdb_multiple --data_path datasets/imagenet-21K/webdataset',
+
     "laion400m": '--dataset wds --data_path "/p/scratch/ccstdl/katta1/LAION-400M/laion400m-dat-release/{00000..41455}.tar"',
+    
     "cifar10": '--data_path datasets/cifar10 --dataset image_folder'
 }
 
 datasets_finetuning = {
     "imagenet1k": '--data_path "/p/scratch/ccstdl/cherti1/imagenet-1K-lmdb" --label_type int --dataset caffe_lmdb --nb_classes 1000',
     "cifar10": '--data_path datasets/cifar10 --dataset image_folder --nb_classes 10',
+    "cifar100": '--data_path datasets/cifar100 --dataset image_folder --nb_classes 100',
+    "cars": '--data_path datasets/stanford_cars/car_data --dataset image_folder --nb_classes 196',
+    "flowers": '--data_path datasets/flowers --dataset image_folder --nb_classes 102',
     "imagenet1k_wds": '--data_path /p/scratch/ccstdl/cherti1/imagenet-1K-webdataset --label_type int --dataset wds --nb_classes 1000 --train_num_samples 1281167 --val_num_samples 50000',
 }
 
 templates = {
-
-    "vits16": {"arch": "vit_small", "patch_size": 16, "out_dim": 65536, "norm_last_layer": "false", "warmup_teacher_temp": 0.04, "teacher_temp": 0.07, "warmup_teacher_temp_epochs": 30, "use_fp16": "false", "weight_decay": 0.04, "weight_decay_end": 0.4, "clip_grad": 0, "batch_size_per_gpu": 64, "epochs": 800, "freeze_last_layer": 1, "lr": 0.0005, "warmup_epochs": 10, "min_lr": 1e-05, "global_crops_scale": [0.25, 1.0], "local_crops_scale": [0.05, 0.25], "local_crops_number": 10, "seed": 0, "num_workers": 10, "optimizer": "adamw", "momentum_teacher": 0.996, "use_bn_in_head": "false", "drop_path_rate": 0.1},
-    
+    "vits16": {"arch": "vit_small", "patch_size": 16, "out_dim": 65536, "norm_last_layer": "false", "warmup_teacher_temp": 0.04, "teacher_temp": 0.07, "warmup_teacher_temp_epochs": 30, "use_fp16": "false", "weight_decay": 0.04, "weight_decay_end": 0.4, "clip_grad": 0, "batch_size_per_gpu": 64, "epochs": 800, "freeze_last_layer": 1, "lr": 0.0005, "warmup_epochs": 10, "min_lr": 1e-05, "global_crops_scale": [0.25, 1.0], "local_crops_scale": [0.05, 0.25], "local_crops_number": 10, "seed": 0, "num_workers": 10, "optimizer": "adamw", "momentum_teacher": 0.996, "use_bn_in_head": "false", "drop_path_rate": 0.1},    
     "vits8": {"arch": "vit_small", "patch_size": 8, "out_dim": 65536, "norm_last_layer": "false", "warmup_teacher_temp": 0.04, "teacher_temp": 0.07, "warmup_teacher_temp_epochs": 30, "use_fp16": "false", "weight_decay": 0.04, "weight_decay_end": 0.4, "clip_grad": 3.0, "batch_size_per_gpu": 16, "epochs": 800, "freeze_last_layer": 1, "lr": 0.0005, "warmup_epochs": 10, "min_lr": 1e-06, "global_crops_scale": [0.4, 1.0], "local_crops_scale": [0.05, 0.4], "local_crops_number": 10, "seed": 0, "num_workers": 10, "optimizer": "adamw", "momentum_teacher": 0.996, "use_bn_in_head": "false", "drop_path_rate": 0.1},
-
     "vitb16": {"arch": "vit_base", "patch_size": 16, "out_dim": 65536, "norm_last_layer": "true", "warmup_teacher_temp": 0.04, "teacher_temp": 0.07, "warmup_teacher_temp_epochs": 50, "use_fp16": "false", "weight_decay": 0.04, "weight_decay_end": 0.4, "clip_grad": 0.3, "batch_size_per_gpu": 32, "epochs": 400, "freeze_last_layer": 3, "lr": 0.00075, "warmup_epochs": 10, "min_lr": 2e-06, "global_crops_scale": [0.25, 1.0], "local_crops_scale": [0.05, 0.25], "local_crops_number": 10, "seed": 0, "num_workers": 10, "optimizer": "adamw", "momentum_teacher": 0.996, "use_bn_in_head": "false", "drop_path_rate": 0.1},
-
     "vitb32": {"arch": "vit_base", "patch_size": 32, "out_dim": 65536, "norm_last_layer": "true", "warmup_teacher_temp": 0.04, "teacher_temp": 0.07, "warmup_teacher_temp_epochs": 50, "use_fp16": "false", "weight_decay": 0.04, "weight_decay_end": 0.4, "clip_grad": 0.3, "batch_size_per_gpu": 128, "epochs": 400, "freeze_last_layer": 3, "lr": 0.00075, "warmup_epochs": 10, "min_lr": 2e-06, "global_crops_scale": [0.25, 1.0], "local_crops_scale": [0.05, 0.25], "local_crops_number": 10, "seed": 0, "num_workers": 10, "optimizer": "adamw", "momentum_teacher": 0.996, "use_bn_in_head": "false", "drop_path_rate": 0.1},
-    
     "vitb32_imagenet21k": {"arch": "vit_base", "patch_size": 32, "out_dim": 65536, "norm_last_layer": "true", "warmup_teacher_temp": 0.04, "teacher_temp": 0.07, "warmup_teacher_temp_epochs": 5, "use_fp16": "false", "weight_decay": 0.04, "weight_decay_end": 0.4, "clip_grad": 0.3, "batch_size_per_gpu": 128, "epochs": 40, "freeze_last_layer": 3, "lr": 0.00075, "warmup_epochs": 1, "min_lr": 2e-06, "global_crops_scale": [0.25, 1.0], "local_crops_scale": [0.05, 0.25], "local_crops_number": 10, "seed": 0, "num_workers": 20, "optimizer": "adamw", "momentum_teacher": 0.996, "use_bn_in_head": "false", "drop_path_rate": 0.1},
-
     "vitb8": {"arch": "vit_base", "patch_size": 8, "out_dim": 65536, "norm_last_layer": "true", "warmup_teacher_temp": 0.03, "teacher_temp": 0.07, "warmup_teacher_temp_epochs": 50, "use_fp16": "false", "weight_decay": 0.04, "weight_decay_end": 0.4, "clip_grad": 3.0, "batch_size_per_gpu": 6, "epochs": 300, "freeze_last_layer": 3, "lr": 0.0005, "warmup_epochs": 10, "min_lr": 2e-06, "global_crops_scale": [0.25, 1.0], "local_crops_scale": [0.05, 0.25], "local_crops_number": 10, "seed": 0, "num_workers": 10, "optimizer": "adamw", "momentum_teacher": 0.996, "use_bn_in_head": "false", "drop_path_rate": 0.1},
-
-
+    "vith8": {"arch": "vit_huge", "patch_size": 8, "out_dim": 65536, "norm_last_layer": "true", "warmup_teacher_temp": 0.03, "teacher_temp": 0.07, "warmup_teacher_temp_epochs": 50, "use_fp16": "false", "weight_decay": 0.04, "weight_decay_end": 0.4, "clip_grad": 3.0, "batch_size_per_gpu": 6, "epochs": 300, "freeze_last_layer": 3, "lr": 0.0005, "warmup_epochs": 10, "min_lr": 2e-06, "global_crops_scale": [0.25, 1.0], "local_crops_scale": [0.05, 0.25], "local_crops_number": 10, "seed": 0, "num_workers": 10, "optimizer": "adamw", "momentum_teacher": 0.996, "use_bn_in_head": "false", "drop_path_rate": 0.1},
+    "vitg8": {"arch": "vit_giant", "patch_size": 8, "out_dim": 65536, "norm_last_layer": "true", "warmup_teacher_temp": 0.03, "teacher_temp": 0.07, "warmup_teacher_temp_epochs": 50, "use_fp16": "false", "weight_decay": 0.04, "weight_decay_end": 0.4, "clip_grad": 3.0, "batch_size_per_gpu": 6, "epochs": 300, "freeze_last_layer": 3, "lr": 0.0005, "warmup_epochs": 10, "min_lr": 2e-06, "global_crops_scale": [0.25, 1.0], "local_crops_scale": [0.05, 0.25], "local_crops_number": 10, "seed": 0, "num_workers": 10, "optimizer": "adamw", "momentum_teacher": 0.996, "use_bn_in_head": "false", "drop_path_rate": 0.1},
+    "vitG8": {"arch": "vit_gigantic", "patch_size": 8, "out_dim": 65536, "norm_last_layer": "true", "warmup_teacher_temp": 0.03, "teacher_temp": 0.07, "warmup_teacher_temp_epochs": 50, "use_fp16": "false", "weight_decay": 0.04, "weight_decay_end": 0.4, "clip_grad": 3.0, "batch_size_per_gpu": 6, "epochs": 300, "freeze_last_layer": 3, "lr": 0.0005, "warmup_epochs": 10, "min_lr": 2e-06, "global_crops_scale": [0.25, 1.0], "local_crops_scale": [0.05, 0.25], "local_crops_number": 10, "seed": 0, "num_workers": 10, "optimizer": "adamw", "momentum_teacher": 0.996, "use_bn_in_head": "false", "drop_path_rate": 0.1},
     "laion400m_vitb32": {"arch": "vit_base", "patch_size": 32, "out_dim": 65536, "norm_last_layer": "false", "warmup_teacher_temp": 0.04, "teacher_temp": 0.07, "warmup_teacher_temp_epochs": 1, "use_fp16": "false", "weight_decay": 0.04, "weight_decay_end": 0.4, "clip_grad": 0.3, "batch_size_per_gpu": 256, "epochs": 32, "freeze_last_layer": 3, "lr": 0.0003, "warmup_epochs": 1, "min_lr": 0.000002, "global_crops_scale": [0.25, 1.0], "local_crops_scale": [0.05, 0.25], "local_crops_number": 1, "seed": 0, "num_workers": 20, "optimizer": "lamb", "momentum_teacher": 0.996, "use_bn_in_head": "false", "drop_path_rate": 0.1},
-    
     "vitl16": {"arch": "vit_large", "patch_size": 16, "out_dim": 65536, "norm_last_layer": "true", "warmup_teacher_temp": 0.04, "teacher_temp": 0.07, "warmup_teacher_temp_epochs": 50, "use_fp16": "false", "weight_decay": 0.04, "weight_decay_end": 0.4, "clip_grad": 0.3, "batch_size_per_gpu": 32, "epochs": 400, "freeze_last_layer": 3, "lr": 0.00075, "warmup_epochs": 10, "min_lr": 2e-06, "global_crops_scale": [0.25, 1.0], "local_crops_scale": [0.05, 0.25], "local_crops_number": 10, "seed": 0, "num_workers": 10, "optimizer": "adamw", "momentum_teacher": 0.996, "use_bn_in_head": "false", "drop_path_rate": 0.1},
 }
+
 def train(
     *,
     dataset="imagenet1k",
@@ -53,6 +57,12 @@ def train(
     num_workers:int=None,
     saveckp_freq:int=None,
     num_samples_per_epoch:int=None,
+    num_batches:int=None,
+    scheduler:str="cosine",
+    fsdp=False,
+    norm_last_layer="true",
+    warmup_epochs:int=None,
+    warmup_teacher_temp_epochs:int=None,
 ):
     os.makedirs(folder, exist_ok=True)
     #nb_runs = len(glob(os.path.join(folder, "out_*")))
@@ -81,6 +91,14 @@ def train(
         hypers["saveckp_freq"] = saveckp_freq
     if num_samples_per_epoch is not None:
         hypers["num_samples_per_epoch"] = num_samples_per_epoch
+    if num_batches is not None:
+        hypers["num_batches"] = num_batches
+    if warmup_epochs is not None:
+        hypers["warmup_epochs"] = warmup_epochs
+    if warmup_teacher_temp_epochs is not None:
+        hypers["warmup_teacher_temp_epochs"] = warmup_teacher_temp_epochs
+    hypers["norm_last_layer"] = norm_last_layer
+    hypers["scheduler"] = scheduler
     def to_str(v):
         if type(v) == list:
             return " ".join(map(str, v))

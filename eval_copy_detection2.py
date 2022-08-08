@@ -28,6 +28,8 @@ import numpy as np
 import utils
 import vision_transformer as vits
 from eval_knn import extract_features
+import transformers
+from transformers import AutoFeatureExtractor
 
 
 class CopydaysDataset():
@@ -163,11 +165,16 @@ def extract_features(image_list, model, args):
     features = None
     for samples, index in utils.MetricLogger(delimiter="  ").log_every(data_loader, 10):
         samples, index = samples.cuda(non_blocking=True), index.cuda(non_blocking=True)
-        feats = model.get_intermediate_layers(samples, n=1)[0].clone()
-
+        # feats = model.get_intermediate_layers(samples, n=1)[0].clone()
+        output = model(samples, output_hidden_states=True, interpolate_pos_encoding=True)
+        feats = output["hidden_states"][-1]
         cls_output_token = feats[:, 0, :]  #  [CLS] token
+        b = len(feats)
+        h = 40
+        w = 40
+        d = 768
         # GeM with exponent 4 for output patch tokens
-        b, h, w, d = len(samples), int(samples.shape[-2] / model.patch_embed.patch_size), int(samples.shape[-1] / model.patch_embed.patch_size), feats.shape[-1]
+        # b, h, w, d = len(samples), int(samples.shape[-2] / model.patch_embed.patch_size), int(samples.shape[-1] / model.patch_embed.patch_size), feats.shape[-1]
         feats = feats[:, 1:, :].reshape(b, h, w, d)
         feats = feats.clamp(min=1e-6).permute(0, 3, 1, 2)
         feats = nn.functional.avg_pool2d(feats.pow(4), (h, w)).pow(1. / 4).reshape(b, -1)
@@ -232,16 +239,23 @@ if __name__ == '__main__':
     cudnn.benchmark = True
 
     # ============ building network ... ============
-    if "vit" in args.arch:
-        model = vits.__dict__[args.arch](patch_size=args.patch_size, num_classes=0)
-        print(f"Model {args.arch} {args.patch_size}x{args.patch_size} built.")
-    else:
-        print(f"Architecture {args.arch} non supported")
-        sys.exit(1)
+    # if "vit" in args.arch:
+        # model = vits.__dict__[args.arch](patch_size=args.patch_size, num_classes=0)
+        # print(f"Model {args.arch} {args.patch_size}x{args.patch_size} built.")
+    # else:
+        # print(f"Architecture {args.arch} non supported")
+        # sys.exit(1)
+    fe = AutoFeatureExtractor.from_pretrained("facebook/dino-vitb8", size=320)
+    def prepro(image):
+        data = fe(image, return_tensors="pt")
+        return data['pixel_values'][0]
+    transform = prepro
+
+    model = getattr(transformers, "ViTModel").from_pretrained("facebook/dino-vitb8")
     if args.use_cuda:
         model.cuda()
     model.eval()
-    utils.load_pretrained_weights(model, args.pretrained_weights, args.checkpoint_key, args.arch, args.patch_size)
+    # utils.load_pretrained_weights(model, args.pretrained_weights, args.checkpoint_key, args.arch, args.patch_size)
 
     dataset = CopydaysDataset(args.data_path)
 

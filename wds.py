@@ -7,6 +7,7 @@ import braceexpand
 import random
 import pdb
 import json
+from glob import glob
 
 import pandas as pd
 import numpy as np
@@ -17,7 +18,7 @@ from typing import Union
 from dataclasses import dataclass
 
 import torch
-from torch.utils.data import Dataset, DataLoader, SubsetRandomSampler
+from torch.utils.data import Dataset, DataLoader, SubsetRandomSampler, get_worker_info
 from torch.utils.data.distributed import DistributedSampler
 import torchvision.datasets as datasets
 from webdataset.utils import identity
@@ -77,6 +78,8 @@ def get_dataset_size(shards):
         # name / path based hacks (NOTE: specific to a given download / instances of dataset in terms of samples)
         if 'cc3m-train' in shards:
             total_size = 2905954
+        elif 'imagenet-1K' in shards:
+            total_size = 1281167
         elif 'cc12m' in shards:
             total_size = 10968539
         elif 'laion' in dir_path.lower():
@@ -278,8 +281,57 @@ class DistShardList(IterableDataset, DistPytorchEnv, Composable):
 def filter_no_caption(sample):
     return 'txt' in sample
 
+def pytorch_worker_seed():
+    """get dataloader worker seed from pytorch"""
+    worker_info = get_worker_info()
+    if worker_info is not None:
+        # favour the seed already created for pytorch dataloader workers if it exists
+        return worker_info.seed
+    # fallback to wds rank based seed
+    return wds.utils.pytorch_worker_seed()
 
-def get_wds_dataset(args, preprocess_img, is_train, num_batches=None):
+class ResampledShards2(IterableDataset, Composable,):
+    """An iterable dataset yielding a list of urls."""
+
+    def __init__(
+        self,
+        urls,
+        nshards=sys.maxsize,
+        worker_seed=None,
+        deterministic=False,
+        epoch=-1,
+    ):
+        """Sample shards from the shard list with replacement.
+        :param urls: a list of URLs as a Python list or brace notation string
+        """
+        super().__init__()
+        urls = wds.shardlists.expand_urls(urls) if type(urls) == str else urls
+        self.urls = urls
+        assert isinstance(self.urls[0], str)
+        self.nshards = nshards
+        self.rng = random.Random()
+        self.worker_seed = pytorch_worker_seed if worker_seed is None else worker_seed
+        self.deterministic = deterministic
+        self.epoch = epoch
+
+    def __iter__(self):
+        """Return an iterator over the shards."""
+        #if isinstance(self.epoch, SharedEpoch):
+        #    epoch = self.epoch.get_value()
+        #else:
+            # NOTE: this is epoch tracking is problematic in a multiprocess (dataloader workers or train)
+            # situation as different workers may wrap at different times (or not at all).
+        self.epoch += 1
+        epoch = self.epoch
+        if self.deterministic:
+            # reset seed w/ epoch if deterministic, worker seed should be deterministic due to arg.seed
+            self.rng.seed(self.worker_seed() + epoch)
+        for _ in range(self.nshards):
+            url = self.rng.choice(self.urls)
+            yield dict(url=url)
+
+
+def get_wds_dataset(args, preprocess_img, is_train, num_batches=None, resampled=False):
     input_shards = args.train_data if is_train else args.val_data
     assert input_shards is not None
     # The following code is adapted from https://github.com/tmbdev/webdataset-examples/blob/master/main-wds.py
@@ -292,11 +344,17 @@ def get_wds_dataset(args, preprocess_img, is_train, num_batches=None):
             num_samples = num_batches * args.batch_size * args.world_size
         else:
             num_batches = num_samples // args.batch_size
-    shardlist = DistShardList(
-        input_shards,
-        epoch_shuffle=is_train,
-        split_by_node=is_train  # NOTE: we do eval on a single gpu.
-    )
+    if os.path.isdir(input_shards):
+        input_shards = glob(os.path.join(input_shards, "**", "*.tar"))
+    print(input_shards, resampled)
+    if resampled:
+        shardlist = ResampledShards2(input_shards, deterministic=False, nshards=num_batches)
+    else:
+        shardlist = DistShardList(
+            input_shards,
+            epoch_shuffle=is_train,
+            split_by_node=is_train  
+        )
     def group(data):
         for sample in data:
             yield tuple(sample["image"]) + tuple([sample["text"]])
@@ -305,7 +363,7 @@ def get_wds_dataset(args, preprocess_img, is_train, num_batches=None):
         wds.WebDataset(shardlist)
         .select(filter_no_caption)
         .decode("pil", handler=wds.ignore_and_continue)
-        .rename(image="jpg;png", text="txt")
+        .rename(image="jpg;png", text="txt;cls")
         .map_dict(image=preprocess_img, text=preprocess_txt)
         .then(group)
         .batched(args.batch_size, partial=not is_train or not args.distributed)
@@ -313,10 +371,11 @@ def get_wds_dataset(args, preprocess_img, is_train, num_batches=None):
     dataloader = wds.WebLoader(
         dataset, batch_size=None, shuffle=False, num_workers=args.workers,
     )
-    if is_train and args.distributed:
-        # With DDP, we need to make sure that all nodes get the same number of batches;
-        # we do that by reusing a little bit of data.
-        dataloader = dataloader.repeat(2).slice(num_batches)
+    if not resampled:
+        if is_train and args.distributed:
+            # With DDP, we need to make sure that all nodes get the same number of batches;
+            # we do that by reusing a little bit of data.
+            dataloader = dataloader.repeat(2).slice(num_batches)
     dataloader.num_batches = num_batches
     dataloader.num_samples = num_samples
 

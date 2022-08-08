@@ -108,6 +108,8 @@ class CaffeLMDBMultiple:
         self._transform = new_transform
 
     def __getitem__(self, idx):
+        # import utils
+        # print(utils.get_rank(), idx)
         # dataset_idx = idx // (self.nb//len(self.datasets))
         # found = False
         # while not found:
