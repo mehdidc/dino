@@ -22,7 +22,7 @@ import torch
 import torch.nn as nn
 
 from utils import trunc_normal_
-
+from torch.utils.checkpoint import checkpoint
 
 def drop_path(x, drop_prob: float = 0., training: bool = False):
     if drop_prob == 0. or not training:
@@ -161,6 +161,7 @@ class VisionTransformer(nn.Module):
         trunc_normal_(self.pos_embed, std=.02)
         trunc_normal_(self.cls_token, std=.02)
         self.apply(self._init_weights)
+        self.grad_checkpointing = False
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -207,10 +208,19 @@ class VisionTransformer(nn.Module):
         return self.pos_drop(x)
 
     def forward(self, x):
-        x = self.prepare_tokens(x)
+        if self.grad_checkpointing:
+            x = checkpoint(self.prepare_tokens, x)
+        else:
+            x = self.prepare_tokens(x)
         for blk in self.blocks:
-            x = blk(x)
-        x = self.norm(x)
+            if self.grad_checkpointing:
+                x = checkpoint(blk, x)
+            else:
+                x = blk(x)
+        if self.grad_checkpointing:
+            x = checkpoint(self.norm, x)
+        else:
+            x = self.norm(x)
         return x[:, 0]
 
     def get_last_selfattention(self, x):

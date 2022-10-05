@@ -134,6 +134,8 @@ def get_args_parser():
     parser.add_argument("--num_samples_per_epoch", default=0, type=int, help="Please ignore and do not set this argument.")
     parser.add_argument("--label_type", default="int", type=str, help="Please ignore and do not set this argument.")
     parser.add_argument('--resampled', default=False, type=utils.bool_flag)
+    parser.add_argument('--grad_checkpointing', default=False, type=utils.bool_flag)
+    parser.add_argument('--use_bfloat16', default=False, type=utils.bool_flag)
     return parser
 
 class DataLoaderWithLen:
@@ -250,7 +252,9 @@ def train_dino(args):
         embed_dim = student.fc.weight.shape[1]
     else:
         print(f"Unknow architecture: {args.arch}")
-
+    if args.grad_checkpointing:
+        student.grad_checkpointing = True
+        print("Use grad checkpointing")
     # multi-crop wrapper handles forward with inputs of different resolutions
     student = utils.MultiCropWrapper(student, DINOHead(
         embed_dim,
@@ -275,7 +279,10 @@ def train_dino(args):
     else:
         # teacher_without_ddp and teacher are the same thing
         teacher_without_ddp = teacher
-    student = nn.parallel.DistributedDataParallel(student, device_ids=[args.gpu])
+    ddp_args = {}
+    if args.grad_checkpointing:
+        ddp_args["find_unused_parameters"] = True
+    student = nn.parallel.DistributedDataParallel(student, device_ids=[args.gpu], **ddp_args)
     # teacher and student start with the same weights
     teacher_without_ddp.load_state_dict(student.module.state_dict())
     # there is no backpropagation through the teacher, so no need for gradients
@@ -384,6 +391,9 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
                     fp16_scaler, args):
     metric_logger = utils.MetricLogger(delimiter="  ")
     header = 'Epoch: [{}/{}]'.format(epoch, args.epochs)
+    precision = {}
+    if args.use_bfloat16:
+        precision["dtype"] = torch.bfloat16
     for it, data in enumerate(metric_logger.log_every(data_loader, 10, header)):
 
         if args.dataset == "wds":
@@ -416,7 +426,7 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
             # images = [im.cuda(non_blocking=True) for im in images]
         images = [im.cuda(non_blocking=True) for im in images]
         # teacher and student forward passes + compute dino loss
-        with torch.cuda.amp.autocast(fp16_scaler is not None):
+        with torch.cuda.amp.autocast(fp16_scaler is not None, **precision):
             teacher_output = teacher(images[:2])  # only the 2 global views pass through the teacher
             student_output = student(images)
             loss = dino_loss(student_output, teacher_output, epoch)

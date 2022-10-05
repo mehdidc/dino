@@ -33,6 +33,7 @@ templates = {
     "vitb32": {"arch": "vit_base", "patch_size": 32, "out_dim": 65536, "norm_last_layer": "true", "warmup_teacher_temp": 0.04, "teacher_temp": 0.07, "warmup_teacher_temp_epochs": 50, "use_fp16": "false", "weight_decay": 0.04, "weight_decay_end": 0.4, "clip_grad": 0.3, "batch_size_per_gpu": 128, "epochs": 400, "freeze_last_layer": 3, "lr": 0.00075, "warmup_epochs": 10, "min_lr": 2e-06, "global_crops_scale": [0.25, 1.0], "local_crops_scale": [0.05, 0.25], "local_crops_number": 10, "seed": 0, "num_workers": 10, "optimizer": "adamw", "momentum_teacher": 0.996, "use_bn_in_head": "false", "drop_path_rate": 0.1},
     "vitb32_imagenet21k": {"arch": "vit_base", "patch_size": 32, "out_dim": 65536, "norm_last_layer": "true", "warmup_teacher_temp": 0.04, "teacher_temp": 0.07, "warmup_teacher_temp_epochs": 5, "use_fp16": "false", "weight_decay": 0.04, "weight_decay_end": 0.4, "clip_grad": 0.3, "batch_size_per_gpu": 128, "epochs": 40, "freeze_last_layer": 3, "lr": 0.00075, "warmup_epochs": 1, "min_lr": 2e-06, "global_crops_scale": [0.25, 1.0], "local_crops_scale": [0.05, 0.25], "local_crops_number": 10, "seed": 0, "num_workers": 20, "optimizer": "adamw", "momentum_teacher": 0.996, "use_bn_in_head": "false", "drop_path_rate": 0.1},
     "vitb8": {"arch": "vit_base", "patch_size": 8, "out_dim": 65536, "norm_last_layer": "true", "warmup_teacher_temp": 0.03, "teacher_temp": 0.07, "warmup_teacher_temp_epochs": 50, "use_fp16": "false", "weight_decay": 0.04, "weight_decay_end": 0.4, "clip_grad": 3.0, "batch_size_per_gpu": 6, "epochs": 300, "freeze_last_layer": 3, "lr": 0.0005, "warmup_epochs": 10, "min_lr": 2e-06, "global_crops_scale": [0.25, 1.0], "local_crops_scale": [0.05, 0.25], "local_crops_number": 10, "seed": 0, "num_workers": 10, "optimizer": "adamw", "momentum_teacher": 0.996, "use_bn_in_head": "false", "drop_path_rate": 0.1},
+    "vitl8": {"arch": "vit_large", "patch_size": 8, "out_dim": 65536, "norm_last_layer": "true", "warmup_teacher_temp": 0.03, "teacher_temp": 0.07, "warmup_teacher_temp_epochs": 50, "use_fp16": "false", "weight_decay": 0.04, "weight_decay_end": 0.4, "clip_grad": 3.0, "batch_size_per_gpu": 6, "epochs": 300, "freeze_last_layer": 3, "lr": 0.0005, "warmup_epochs": 10, "min_lr": 2e-06, "global_crops_scale": [0.25, 1.0], "local_crops_scale": [0.05, 0.25], "local_crops_number": 10, "seed": 0, "num_workers": 10, "optimizer": "adamw", "momentum_teacher": 0.996, "use_bn_in_head": "false", "drop_path_rate": 0.1},
     "vith8": {"arch": "vit_huge", "patch_size": 8, "out_dim": 65536, "norm_last_layer": "true", "warmup_teacher_temp": 0.03, "teacher_temp": 0.07, "warmup_teacher_temp_epochs": 50, "use_fp16": "false", "weight_decay": 0.04, "weight_decay_end": 0.4, "clip_grad": 3.0, "batch_size_per_gpu": 6, "epochs": 300, "freeze_last_layer": 3, "lr": 0.0005, "warmup_epochs": 10, "min_lr": 2e-06, "global_crops_scale": [0.25, 1.0], "local_crops_scale": [0.05, 0.25], "local_crops_number": 10, "seed": 0, "num_workers": 10, "optimizer": "adamw", "momentum_teacher": 0.996, "use_bn_in_head": "false", "drop_path_rate": 0.1},
     "vitg8": {"arch": "vit_giant", "patch_size": 8, "out_dim": 65536, "norm_last_layer": "true", "warmup_teacher_temp": 0.03, "teacher_temp": 0.07, "warmup_teacher_temp_epochs": 50, "use_fp16": "false", "weight_decay": 0.04, "weight_decay_end": 0.4, "clip_grad": 3.0, "batch_size_per_gpu": 6, "epochs": 300, "freeze_last_layer": 3, "lr": 0.0005, "warmup_epochs": 10, "min_lr": 2e-06, "global_crops_scale": [0.25, 1.0], "local_crops_scale": [0.05, 0.25], "local_crops_number": 10, "seed": 0, "num_workers": 10, "optimizer": "adamw", "momentum_teacher": 0.996, "use_bn_in_head": "false", "drop_path_rate": 0.1},
     "vitG8": {"arch": "vit_gigantic", "patch_size": 8, "out_dim": 65536, "norm_last_layer": "true", "warmup_teacher_temp": 0.03, "teacher_temp": 0.07, "warmup_teacher_temp_epochs": 50, "use_fp16": "false", "weight_decay": 0.04, "weight_decay_end": 0.4, "clip_grad": 3.0, "batch_size_per_gpu": 6, "epochs": 300, "freeze_last_layer": 3, "lr": 0.0005, "warmup_epochs": 10, "min_lr": 2e-06, "global_crops_scale": [0.25, 1.0], "local_crops_scale": [0.05, 0.25], "local_crops_number": 10, "seed": 0, "num_workers": 10, "optimizer": "adamw", "momentum_teacher": 0.996, "use_bn_in_head": "false", "drop_path_rate": 0.1},
@@ -58,11 +59,14 @@ def train(
     saveckp_freq:int=None,
     num_samples_per_epoch:int=None,
     num_batches:int=None,
+    use_fp16:bool=None,
+    use_bfloat16:bool=None,
     scheduler:str="cosine",
     fsdp=False,
     norm_last_layer="true",
     warmup_epochs:int=None,
     warmup_teacher_temp_epochs:int=None,
+    grad_checkpointing=False,
 ):
     os.makedirs(folder, exist_ok=True)
     #nb_runs = len(glob(os.path.join(folder, "out_*")))
@@ -97,6 +101,12 @@ def train(
         hypers["warmup_epochs"] = warmup_epochs
     if warmup_teacher_temp_epochs is not None:
         hypers["warmup_teacher_temp_epochs"] = warmup_teacher_temp_epochs
+    if grad_checkpointing:
+        hypers["grad_checkpointing"] = "true"
+    if use_fp16 is not None:
+        hypers["use_fp16"] = use_fp16
+    if use_bfloat16 is not None:
+        hypers["use_bloat16"] = use_bfloat16
     hypers["norm_last_layer"] = norm_last_layer
     hypers["scheduler"] = scheduler
     def to_str(v):
