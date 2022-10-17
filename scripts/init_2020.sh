@@ -67,3 +67,14 @@ if [[ "$machine" == jusuf ]]; then
     #ml scikit
     source /p/project/covidnetx/environments/jusuf/bin/activate
 fi
+if [[ "$machine" == hdfml ]]; then
+    export CUDA_VISIBLE_DEVICES=0,1,2,3
+    ml purge
+    ml use $OTHERSTAGES
+    ml Stages/2020
+    ml GCC/10.3.0
+    ml OpenMPI/4.1.1
+    ml Horovod/0.23.0-Python-3.8.5
+    ml scikit
+    source envs/hdfml/bin/activate 
+fi

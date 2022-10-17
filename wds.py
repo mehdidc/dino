@@ -64,7 +64,7 @@ def preprocess_txt(text):
     return tokenizer(str(text))
 
 
-def get_dataset_size(shards):
+def get_dataset_size(args, shards):
     shards_list = list(braceexpand.braceexpand(shards))
     dir_path = os.path.dirname(shards)
     if 'sizes.json' in os.listdir(dir_path):
@@ -72,6 +72,8 @@ def get_dataset_size(shards):
         sizes = json.load(open(sizes_filename, 'r'))
         total_size = sum(
             [int(sizes[os.path.basename(shard)]) for shard in shards_list])
+    elif args.num_samples_per_epoch:
+        total_size = args.num_samples_per_epoch
     elif '__len__' in os.listdir(dir_path):
         total_size = eval(open(os.path.join(dir_path, '__len__'), 'r').read())
     else:
@@ -335,7 +337,7 @@ def get_wds_dataset(args, preprocess_img, is_train, num_batches=None, resampled=
     input_shards = args.train_data if is_train else args.val_data
     assert input_shards is not None
     # The following code is adapted from https://github.com/tmbdev/webdataset-examples/blob/master/main-wds.py
-    num_samples, num_shards = get_dataset_size(input_shards)
+    num_samples, num_shards = get_dataset_size(args, input_shards)
     if num_batches is None:
         if is_train and args.distributed:
             max_shards_per_node = math.ceil(num_shards / args.world_size)
@@ -357,14 +359,14 @@ def get_wds_dataset(args, preprocess_img, is_train, num_batches=None, resampled=
         )
     def group(data):
         for sample in data:
-            yield tuple(sample["image"]) + tuple([sample["text"]])
+            yield tuple(sample["image"]) #+ tuple([sample["text"]])
 
     dataset = (
         wds.WebDataset(shardlist)
         .select(filter_no_caption)
         .decode("pil", handler=wds.ignore_and_continue)
-        .rename(image="jpg;png", text="txt;cls")
-        .map_dict(image=preprocess_img, text=preprocess_txt)
+        .rename(image="jpg;png")
+        .map_dict(image=preprocess_img)
         .then(group)
         .batched(args.batch_size, partial=not is_train or not args.distributed)
     )
@@ -448,17 +450,77 @@ def get_data(args, preprocess_fns):
 
     return data
 
+
+from torchvision import datasets, transforms
+import utils
+class DataAugmentationDINO(object):
+    def __init__(self, global_crops_scale, local_crops_scale, local_crops_number, stack=False):
+        flip_and_color_jitter = transforms.Compose([
+            transforms.RandomHorizontalFlip(p=0.5),
+            transforms.RandomApply(
+                [transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1)],
+                p=0.8
+            ),
+            transforms.RandomGrayscale(p=0.2),
+        ])
+        normalize = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+        ])
+
+        # first global crop
+        self.global_transfo1 = transforms.Compose([
+            transforms.RandomResizedCrop(224, scale=global_crops_scale, interpolation=Image.BICUBIC),
+            flip_and_color_jitter,
+            utils.GaussianBlur(1.0),
+            normalize,
+        ])
+        # second global crop
+        self.global_transfo2 = transforms.Compose([
+            transforms.RandomResizedCrop(224, scale=global_crops_scale, interpolation=Image.BICUBIC),
+            flip_and_color_jitter,
+            utils.GaussianBlur(0.1),
+            utils.Solarization(0.2),
+            normalize,
+        ])
+        # transformation for the local small crops
+        self.local_crops_number = local_crops_number
+        self.local_transfo = transforms.Compose([
+            transforms.RandomResizedCrop(96, scale=local_crops_scale, interpolation=Image.BICUBIC),
+            flip_and_color_jitter,
+            utils.GaussianBlur(p=0.5),
+            normalize,
+        ])
+        self.stack = stack
+
+    def __call__(self, image):
+        crops = []
+        crops.append(self.global_transfo1(image))
+        crops.append(self.global_transfo2(image))
+        for _ in range(self.local_crops_number):
+            crops.append(self.local_transfo(image))
+        if self.stack:
+            return [torch.cat(crops[0:2], dim=0), torch.cat(crops[2:], dim=0)]
+        else:
+            return crops
+
+
+
 if __name__ == "__main__":
+    p = DataAugmentationDINO([0.4, 1], [0.4, 1], 10)
     class Args:
         distributed = False
         batch_size = 2
         train_data = "/p/scratch/ccstdl/katta1/LAION-400M/laion400m-dat-release/{00000..41455}.tar"
         workers = 1
     def preprocess_img(x):
-        return torch.ones(2,3,64,64)
+        return x
+        #return torch.ones(2,3,64,64)
         # return x, x
     is_train = True
     import os
     os.environ['WDS_EPOCH'] = '0'
-    ds =  get_wds_dataset(Args, preprocess_img, is_train)
+    ds =  get_wds_dataset(Args, p, is_train)
+    for x in ds.dataloader:
+        print(x[0].shape, x[1].shape)
     print(ds.dataloader.num_samples)

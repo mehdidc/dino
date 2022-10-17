@@ -19,7 +19,6 @@ import time
 import math
 import json
 from pathlib import Path
-import wds
 
 import numpy as np
 from PIL import Image
@@ -221,6 +220,7 @@ def train_dino(args):
             workers = args.num_workers
             world_size = args.world_size
             rank = args.rank
+            num_samples_per_epoch = args.num_samples_per_epoch
         if args.num_samples_per_epoch:
             args.num_batches = args.num_samples_per_epoch // (args.batch_size_per_gpu * args.world_size)
         data_loader = wds.get_wds_dataset(wds_args, transform, True, num_batches=args.num_batches if args.num_batches else None, resampled=args.resampled).dataloader
