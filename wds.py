@@ -1,39 +1,31 @@
-import os
-import sys
-import math
-import logging
-import functools
-import braceexpand
-import random
-import pdb
+import ast
 import json
-from glob import glob
-
-import pandas as pd
-import numpy as np
-import pyarrow as pa
-from PIL import Image
-
-from typing import Union
+import logging
+import math
+import os
+import random
+import sys
+import time
 from dataclasses import dataclass
+from multiprocessing import Value
 
+import braceexpand
+import numpy as np
+import pandas as pd
 import torch
-from torch.utils.data import Dataset, DataLoader, SubsetRandomSampler, get_worker_info
-from torch.utils.data.distributed import DistributedSampler
 import torchvision.datasets as datasets
-from webdataset.utils import identity
 import webdataset as wds
-from webdataset.shardlists import IterableDataset, Composable, ShardSample, SimpleShardSample
-
-from distributed import world_info_from_env
-
-def tokenizer(x):
-    return x
+from PIL import Image
+from torch.utils.data import Dataset, DataLoader, SubsetRandomSampler, IterableDataset, get_worker_info
+from torch.utils.data.distributed import DistributedSampler
+from webdataset.filters import _shuffle
+from webdataset.tariterators import base_plus_ext, url_opener, tar_file_expander, valid_sample
 
 try:
     import horovod.torch as hvd
 except ImportError:
     hvd = None
+
 
 class CsvDataset(Dataset):
     def __init__(self, input_filename, transforms, img_key, caption_key, sep="\t"):
@@ -54,40 +46,59 @@ class CsvDataset(Dataset):
         return images, texts
 
 
+class SharedEpoch:
+    def __init__(self, epoch: int = 0):
+        self.shared_epoch = Value('i', epoch)
+
+    def set_value(self, epoch):
+        self.shared_epoch.value = epoch
+
+    def get_value(self):
+        return self.shared_epoch.value
+
+
 @dataclass
 class DataInfo:
     dataloader: DataLoader
-    sampler: DistributedSampler
+    sampler: DistributedSampler = None
+    shared_epoch: SharedEpoch = None
+
+    def set_epoch(self, epoch):
+        if self.shared_epoch is not None:
+            self.shared_epoch.set_value(epoch)
+        if self.sampler is not None and isinstance(self.sampler, DistributedSampler):
+            self.sampler.set_epoch(epoch)
 
 
 def preprocess_txt(text):
-    return tokenizer(str(text))
+    return tokenize([str(text)])[0]
 
+from glob import glob
 
-def get_dataset_size(args, shards):
-    shards_list = list(braceexpand.braceexpand(shards))
-    dir_path = os.path.dirname(shards)
-    if 'sizes.json' in os.listdir(dir_path):
+def get_dataset_size(shards):
+    if type(shards) == list:
+        shards_list = shards
+        dir_path = os.path.dirname(shards[0])
         sizes_filename = os.path.join(dir_path, 'sizes.json')
-        sizes = json.load(open(sizes_filename, 'r'))
-        total_size = sum(
-            [int(sizes[os.path.basename(shard)]) for shard in shards_list])
-    elif args.num_samples_per_epoch:
-        total_size = args.num_samples_per_epoch
-    elif '__len__' in os.listdir(dir_path):
-        total_size = eval(open(os.path.join(dir_path, '__len__'), 'r').read())
+        len_filename = os.path.join(dir_path, '__len__')
     else:
-        # name / path based hacks (NOTE: specific to a given download / instances of dataset in terms of samples)
-        if 'cc3m-train' in shards:
-            total_size = 2905954
-        elif 'imagenet-1K' in shards:
-            total_size = 1281167
-        elif 'cc12m' in shards:
-            total_size = 10968539
-        elif 'laion' in dir_path.lower():
-            total_size = 407332084
-        else:
-            raise ValueError(f'Could not find dataset size in {dir_path}')
+        shards_list = list(braceexpand.braceexpand(shards))
+        dir_path = os.path.dirname(shards)
+        sizes_filename = os.path.join(dir_path, 'sizes.json')
+        len_filename = os.path.join(dir_path, '__len__')
+    if os.path.exists(sizes_filename):
+        sizes = json.load(open(sizes_filename, 'r'))
+        total_size = sum([int(sizes[os.path.basename(shard)]) for shard in shards_list])
+    elif os.path.exists(len_filename):
+        # FIXME this used to be eval(open(...)) but that seemed rather unsafe
+        total_size = ast.literal_eval(open(len_filename, 'r').read())
+    else:
+        total_size = None  # num samples undefined
+        # some common dataset sizes (at time of authors last download)
+        # CC3M (train): 2905954
+        # CC12M: 10968539
+        # LAION-400M: 407332084
+        # LAION-2B (english): 2170337258
     num_shards = len(shards_list)
     return total_size, num_shards
 
@@ -102,7 +113,7 @@ def get_imagenet(args, preprocess_fns, split):
         dataset = ImageNetV2Dataset(location=args.imagenet_v2, transform=preprocess_val)
     else:
         if is_train:
-            data_path  = args.imagenet_train
+            data_path = args.imagenet_train
             preprocess_fn = preprocess_train
         else:
             data_path = args.imagenet_val
@@ -135,7 +146,7 @@ def get_imagenet(args, preprocess_fns, split):
         sampler=sampler,
     )
 
-    return DataInfo(dataloader, sampler)
+    return DataInfo(dataloader=dataloader, sampler=sampler)
 
 
 def count_samples(dataloader):
@@ -148,140 +159,51 @@ def count_samples(dataloader):
     return n_elements, n_batches
 
 
-class DistPytorchEnv:
-    """A class encapsulating the PyTorch node/worker environment."""
-
-    def __init__(self, group=None):
-        """Initialize rank/worker information."""
-        import socket
-
-        super().__init__()
-        self.rank = None
-        self.worker = None
-        self.group = group
-        self.nodeinfo = (socket.gethostname(), os.getpid())
-        self.update_env()
-
-    def update_env(self):
-        """Update information about node and worker environment.
-        This code is written this way because the torch.distributed info is
-        available only in the environment where the loader is created.
-        This class retains that environment info when it is serialized.
-        """
-        from webdataset import gopen
-
-        try:
-            import torch
-            import torch.distributed
-        except Exception:
-            return
-
-        if self.rank is None:
-            if hvd is not None and hvd.is_initialized():
-                self.rank = hvd.rank(), hvd.size()
-            elif torch.distributed.is_available() and torch.distributed.is_initialized():
-                group = self.group or torch.distributed.group.WORLD
-                self.rank = torch.distributed.get_rank(group=group), \
-                            torch.distributed.get_world_size(group=group)
-            else:
-                _, rank, world_size = world_info_from_env()
-                if world_size > 1:
-                    self.rank = (rank, world_size)
-
-        if self.worker is None:
-            worker_info = torch.utils.data.get_worker_info()
-            if worker_info is not None:
-                self.worker = worker_info.id, worker_info.num_workers
-
-        gopen.info["nodeinfo"] = self.nodeinfo
-        gopen.info["rank"], gopen.info["size"] = self.rank or (-1, -1)
-        gopen.info["worker_id"], gopen.info["num_workers"] = self.worker or (-1, -1)
+def filter_no_caption_or_no_image(sample):
+    return ('txt' in sample) and ('png' in sample or 'jpg' in sample)
 
 
-class DistShardList(IterableDataset, DistPytorchEnv, Composable):
-    """An iterable dataset yielding a list of urls.
-    This understands the PyTorch distributed and worker APIs and splits shards
-    accordingly.
+def log_and_continue(exn):
+    """Call in an exception handler to ignore any exception, isssue a warning, and continue."""
+    logging.warning(f'Handling webdataset error ({repr(exn)}). Ignoring.')
+    return True
+
+
+def group_by_keys_nothrow(data, keys=base_plus_ext, lcase=True, suffixes=None, handler=None):
+    """Return function over iterator that groups key, value pairs into samples.
+
+    :param keys: function that splits the key into key and extension (base_plus_ext)
+    :param lcase: convert suffixes to lower case (Default value = True)
     """
-
-    def __init__(
-        self,
-        urls,
-        epoch_shuffle=False,
-        shuffle=True,
-        split_by_worker=True,
-        split_by_node=True,
-        verbose=False,
-    ):
-        """Create a ShardList.
-        :param urls: a list of URLs as a Python list or brace notation string
-        :param shuffle: shuffle samples before iterating
-        :param split_by_node: split shards by node if True
-        :param split_by_worker: split shards by worker if True
-        :param group: group used for determining rank/world_size
-        If WDS_SHUFFLE is in the environment, it is used for shuffling shards prior
-        to splitting; this assigns different shards to different nodes on each epoch.
-        """
-        super().__init__()
-
-        self.verbose = verbose
-        if self.verbose:
-            print("PytorchShardList init")
-        self.epoch = -1
-        self.epoch_shuffle = epoch_shuffle
-        self.shuffle = shuffle
-        self.split_by_worker = split_by_worker
-        self.split_by_node = split_by_node
-        if not isinstance(urls, ShardSample):
-            urls = SimpleShardSample(urls)
-        self.shardsample = urls
-
-    def set_epoch(self, epoch):
-        """Set the current epoch. Used for per-node shuffling."""
-        self.epoch = epoch - 1
-
-    def __iter__(self):
-        """Return an iterator over the shards."""
-        self.epoch += 1
-        if hasattr(self.shardsample, "set_epoch"):
-            self.shardsample.set_epoch(self.epoch)
-        self.update_env()
-        urls = self.shardsample.sample()
-        if self.epoch_shuffle:
-            if "WDS_EPOCH" not in os.environ:
-                raise ValueError(
-                    "when specifying epoch_shuffle, you must provide the epoch in the WDS_EPOCH environment variable"
-                )
-            epoch = int(os.environ["WDS_EPOCH"])
-            if self.verbose:
-                print(f"PytorchShardList epochshuffle {epoch}")
-            random.Random(epoch).shuffle(urls)
-        if self.split_by_node:
-            rank, world = self.rank or (0, 1)
-            if self.verbose:
-                print(f"PytorchShardList rank {rank} of {world}")
-            urls = urls[rank::world]
-        if self.split_by_worker:
-            worker, nworkers = self.worker or (0, 1)
-            if self.verbose:
-                print(f"PytorchShardList worker {worker} of {nworkers}")
-            urls = urls[worker::nworkers]
-        if self.shuffle:
-            random.Random(self.epoch + 17).shuffle(urls)
-        if self.verbose:
-            print(f"PytorchShardList got {len(urls)} urls")
-        for url in urls:
-            yield dict(
-                url=url,
-                __url__=url,
-                __worker__=str(self.worker),
-                __rank__=str(self.rank),
-                __nodeinfo__=str(self.nodeinfo),
-            )
+    current_sample = None
+    for filesample in data:
+        assert isinstance(filesample, dict)
+        fname, value = filesample["fname"], filesample["data"]
+        prefix, suffix = keys(fname)
+        if prefix is None:
+            continue
+        if lcase:
+            suffix = suffix.lower()
+        # FIXME webdataset version throws if suffix in current_sample, but we have a potential for
+        #  this happening in the current LAION400m dataset if a tar ends with same prefix as the next
+        #  begins, rare, but can happen since prefix aren't unique across tar files in that dataset
+        if current_sample is None or prefix != current_sample["__key__"] or suffix in current_sample:
+            if valid_sample(current_sample):
+                yield current_sample
+            current_sample = dict(__key__=prefix, __url__=filesample["__url__"])
+        if suffixes is None or suffix in suffixes:
+            current_sample[suffix] = value
+    if valid_sample(current_sample):
+        yield current_sample
 
 
-def filter_no_caption(sample):
-    return 'txt' in sample
+def tarfile_to_samples_nothrow(src, handler=log_and_continue):
+    # NOTE this is a re-impl of the webdataset impl with group_by_keys that doesn't throw
+    streams = url_opener(src, handler=handler)
+    files = tar_file_expander(streams, handler=handler)
+    samples = group_by_keys_nothrow(files, handler=handler)
+    return samples
+
 
 def pytorch_worker_seed():
     """get dataloader worker seed from pytorch"""
@@ -292,7 +214,55 @@ def pytorch_worker_seed():
     # fallback to wds rank based seed
     return wds.utils.pytorch_worker_seed()
 
-class ResampledShards2(IterableDataset, Composable,):
+
+_SHARD_SHUFFLE_SIZE = 2000
+_SHARD_SHUFFLE_INITIAL = 500
+_SAMPLE_SHUFFLE_SIZE = 5000
+_SAMPLE_SHUFFLE_INITIAL = 1000
+
+
+class detshuffle2(wds.PipelineStage):
+    def __init__(
+            self,
+            bufsize=1000,
+            initial=100,
+            seed=0,
+            epoch=-1,
+    ):
+        self.bufsize = bufsize
+        self.initial = initial
+        self.seed = seed
+        self.epoch = epoch
+
+    def run(self, src):
+        if isinstance(self.epoch, SharedEpoch):
+            epoch = self.epoch.get_value()
+        else:
+            # NOTE: this is epoch tracking is problematic in a multiprocess (dataloader workers or train)
+            # situation as different workers may wrap at different times (or not at all).
+            self.epoch += 1
+            epoch = self.epoch
+        rng = random.Random()
+        if self.seed < 0:
+            seed = pytorch_worker_seed() + epoch
+        else:
+            seed = self.seed + epoch
+        rng.seed(seed)
+        return _shuffle(src, self.bufsize, self.initial, rng)
+
+import pickle
+def filter_image(sample):
+    if "proba.pyd" in sample:
+        proba = pickle.loads(sample["proba.pyd"])
+        return proba >= 0.9
+    else:
+        return True
+
+def group(data):
+    for sample in data:
+        yield tuple(sample["image"]) #+ tuple([sample["text"]])
+
+class ResampledShards2(IterableDataset):
     """An iterable dataset yielding a list of urls."""
 
     def __init__(
@@ -304,10 +274,11 @@ class ResampledShards2(IterableDataset, Composable,):
         epoch=-1,
     ):
         """Sample shards from the shard list with replacement.
+
         :param urls: a list of URLs as a Python list or brace notation string
         """
         super().__init__()
-        urls = wds.shardlists.expand_urls(urls) if type(urls) == str else urls
+        urls = wds.shardlists.expand_urls(urls)
         self.urls = urls
         assert isinstance(self.urls[0], str)
         self.nshards = nshards
@@ -318,73 +289,129 @@ class ResampledShards2(IterableDataset, Composable,):
 
     def __iter__(self):
         """Return an iterator over the shards."""
-        #if isinstance(self.epoch, SharedEpoch):
-        #    epoch = self.epoch.get_value()
-        #else:
+        if isinstance(self.epoch, SharedEpoch):
+            epoch = self.epoch.get_value()
+        else:
             # NOTE: this is epoch tracking is problematic in a multiprocess (dataloader workers or train)
             # situation as different workers may wrap at different times (or not at all).
-        self.epoch += 1
-        epoch = self.epoch
+            self.epoch += 1
+            epoch = self.epoch
         if self.deterministic:
             # reset seed w/ epoch if deterministic, worker seed should be deterministic due to arg.seed
             self.rng.seed(self.worker_seed() + epoch)
+            # print("SEED", epoch, self.worker_seed() + epoch)
         for _ in range(self.nshards):
-            url = self.rng.choice(self.urls)
-            yield dict(url=url)
+            yield dict(url=self.rng.choice(self.urls))
 
 
-def get_wds_dataset(args, preprocess_img, is_train, num_batches=None, resampled=False):
+def get_wds_dataset(args, preprocess_img, is_train, epoch=0, floor=False):
     input_shards = args.train_data if is_train else args.val_data
-    assert input_shards is not None
-    # The following code is adapted from https://github.com/tmbdev/webdataset-examples/blob/master/main-wds.py
-    num_samples, num_shards = get_dataset_size(args, input_shards)
-    if num_batches is None:
-        if is_train and args.distributed:
-            max_shards_per_node = math.ceil(num_shards / args.world_size)
-            num_samples = args.world_size * (num_samples * max_shards_per_node // num_shards)
-            num_batches = num_samples // (args.batch_size * args.world_size)
-            num_samples = num_batches * args.batch_size * args.world_size
-        else:
-            num_batches = num_samples // args.batch_size
     if os.path.isdir(input_shards):
-        input_shards = glob(os.path.join(input_shards, "**", "*.tar"))
-    print(input_shards, resampled)
-    if resampled:
-        shardlist = ResampledShards2(input_shards, deterministic=False, nshards=num_batches)
-    else:
-        shardlist = DistShardList(
-            input_shards,
-            epoch_shuffle=is_train,
-            split_by_node=is_train  
-        )
-    def group(data):
-        for sample in data:
-            yield tuple(sample["image"]) #+ tuple([sample["text"]])
+        input_shards = list(glob(os.path.join(input_shards, "*.tar"))) + list(glob(os.path.join(input_shards, "**", "*.tar")))
 
-    dataset = (
-        wds.WebDataset(shardlist)
-        .select(filter_no_caption)
-        .decode("pil", handler=wds.ignore_and_continue)
-        .rename(image="jpg;png")
-        .map_dict(image=preprocess_img)
-        .then(group)
-        .batched(args.batch_size, partial=not is_train or not args.distributed)
-    )
+    assert input_shards is not None
+    resampled = getattr(args, 'resampled', False) and is_train
+
+    num_samples, num_shards = get_dataset_size(input_shards)
+    if not num_samples:
+        if is_train:
+            num_samples = args.train_num_samples
+            if not num_samples:
+                raise RuntimeError(
+                    'Currently, number of dataset samples must be specified for training dataset. '
+                    'Please specify via `--train-num-samples` if no dataset length info present.')
+        else:
+            num_samples = args.val_num_samples or 0  # eval will just exhaust the iterator if not specified
+
+    shared_epoch = SharedEpoch(epoch=epoch)  # create a shared epoch store to sync epoch to dataloader worker proc
+    if resampled:
+        pipeline = [ResampledShards2(input_shards, deterministic=True, epoch=shared_epoch)]
+    else:
+        pipeline = [wds.SimpleShardList(input_shards)]
+
+    # at this point we have an iterator over all the shards
+    if is_train:
+        if not resampled:
+            pipeline.extend([
+                detshuffle2(
+                    bufsize=_SHARD_SHUFFLE_SIZE,
+                    initial=_SHARD_SHUFFLE_INITIAL,
+                    seed=args.seed,
+                    epoch=shared_epoch,
+                ),
+                wds.split_by_node,
+                wds.split_by_worker,
+            ])
+        pipeline.extend([
+            # at this point, we have an iterator over the shards assigned to each worker at each node
+            tarfile_to_samples_nothrow,  # wds.tarfile_to_samples(handler=log_and_continue),
+            wds.shuffle(
+                bufsize=_SAMPLE_SHUFFLE_SIZE,
+                initial=_SAMPLE_SHUFFLE_INITIAL,
+            ),
+        ])
+    else:
+        pipeline.extend([
+            wds.split_by_worker,
+            # at this point, we have an iterator over the shards assigned to each worker
+            wds.tarfile_to_samples(handler=log_and_continue),
+        ])
+    pipeline.extend([
+        wds.select(filter_image),
+        wds.decode("pilrgb", handler=log_and_continue),
+        wds.rename(image="jpg;png"),
+        wds.map_dict(image=preprocess_img),
+        group,
+        wds.batched(args.batch_size, partial=not is_train),
+    ])
+
+    dataset = wds.DataPipeline(*pipeline)
+    if is_train:
+        if not resampled:
+            assert num_shards >= args.workers * args.world_size, 'number of shards must be >= total workers'
+        # roll over and repeat a few samples to get same number of full batches on each node
+        round_fn = math.floor if floor else math.ceil
+        global_batch_size = args.batch_size * args.world_size
+        num_batches = round_fn(num_samples / global_batch_size)
+        num_workers = max(1, args.workers)
+        num_worker_batches = round_fn(num_batches / num_workers)  # per dataloader worker
+        num_batches = num_worker_batches * num_workers
+        num_samples = num_batches * global_batch_size
+        dataset = dataset.with_epoch(num_worker_batches)  # each worker is iterating over this
+    else:
+        # last batches are partial, eval is done on single (master) node
+        num_batches = math.ceil(num_samples / args.batch_size)
+
     dataloader = wds.WebLoader(
-        dataset, batch_size=None, shuffle=False, num_workers=args.workers,
+        dataset,
+        batch_size=None,
+        shuffle=False,
+        num_workers=args.workers,
+        persistent_workers=True,
     )
-    if not resampled:
-        if is_train and args.distributed:
-            # With DDP, we need to make sure that all nodes get the same number of batches;
-            # we do that by reusing a little bit of data.
-            dataloader = dataloader.repeat(2).slice(num_batches)
+
+    # FIXME not clear which approach is better, with_epoch before vs after dataloader?
+    # hoping to resolve via https://github.com/webdataset/webdataset/issues/169
+    # if is_train:
+    #     # roll over and repeat a few samples to get same number of full batches on each node
+    #     global_batch_size = args.batch_size * args.world_size
+    #     num_batches = math.ceil(num_samples / global_batch_size)
+    #     num_workers = max(1, args.workers)
+    #     num_batches = math.ceil(num_batches / num_workers) * num_workers
+    #     num_samples = num_batches * global_batch_size
+    #     dataloader = dataloader.with_epoch(num_batches)
+    # else:
+    #     # last batches are partial, eval is done on single (master) node
+    #     num_batches = math.ceil(num_samples / args.batch_size)
+
+    # add meta-data to dataloader instance for convenience
     dataloader.num_batches = num_batches
     dataloader.num_samples = num_samples
 
-    return DataInfo(dataloader, None)
+    return DataInfo(dataloader=dataloader, shared_epoch=shared_epoch)
 
 
-def get_csv_dataset(args, preprocess_fn, is_train):
+def get_csv_dataset(args, preprocess_fn, is_train, epoch=0):
     input_filename = args.train_data if is_train else args.val_data
     assert input_filename
     dataset = CsvDataset(
@@ -430,13 +457,13 @@ def get_dataset_fn(data_path, dataset_type):
         raise ValueError(f"Unsupported dataset type: {dataset_type}")
     
 
-def get_data(args, preprocess_fns):
+def get_data(args, preprocess_fns, epoch=0):
     preprocess_train, preprocess_val = preprocess_fns
     data = {}
 
     if args.train_data:
         data["train"] = get_dataset_fn(args.train_data, args.dataset_type)(
-            args, preprocess_train, is_train=True)
+            args, preprocess_train, is_train=True, epoch=epoch)
 
     if args.val_data:
         data["val"] = get_dataset_fn(args.val_data, args.dataset_type)(
@@ -450,9 +477,9 @@ def get_data(args, preprocess_fns):
 
     return data
 
-
 from torchvision import datasets, transforms
-import utils
+
+
 class DataAugmentationDINO(object):
     def __init__(self, global_crops_scale, local_crops_scale, local_crops_number, stack=False):
         flip_and_color_jitter = transforms.Compose([
@@ -506,21 +533,25 @@ class DataAugmentationDINO(object):
 
 
 
+
 if __name__ == "__main__":
-    p = DataAugmentationDINO([0.4, 1], [0.4, 1], 10)
-    class Args:
+    import wds
+    import utils
+
+    class wds_args:
         distributed = False
-        batch_size = 2
-        train_data = "/p/scratch/ccstdl/katta1/LAION-400M/laion400m-dat-release/{00000..41455}.tar"
-        workers = 1
-    def preprocess_img(x):
-        return x
-        #return torch.ones(2,3,64,64)
-        # return x, x
-    is_train = True
-    import os
-    os.environ['WDS_EPOCH'] = '0'
-    ds =  get_wds_dataset(Args, p, is_train)
-    for x in ds.dataloader:
-        print(x[0].shape, x[1].shape)
-    print(ds.dataloader.num_samples)
+        batch_size = 4
+        train_data = '/p/scratch/ccstdl/cherti1/imagenet-1K-webdataset/train'
+        workers = 4
+        world_size = 1
+        rank = 0
+        train_num_samples = 1000
+        resampled = True
+    transform = DataAugmentationDINO(
+        (0.1,0.2),
+        (0.1,0.2),
+        10
+    )
+    data_loader = wds.get_wds_dataset(wds_args, transform, True,).dataloader
+    for x in data_loader:
+        print(len(x))

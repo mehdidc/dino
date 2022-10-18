@@ -220,12 +220,10 @@ def train_dino(args):
             workers = args.num_workers
             world_size = args.world_size
             rank = args.rank
-            num_samples_per_epoch = args.num_samples_per_epoch
-        if args.num_samples_per_epoch:
-            args.num_batches = args.num_samples_per_epoch // (args.batch_size_per_gpu * args.world_size)
-        data_loader = wds.get_wds_dataset(wds_args, transform, True, num_batches=args.num_batches if args.num_batches else None, resampled=args.resampled).dataloader
-        print(data_loader.num_batches)
-        data_loader = DataLoaderWithLen(data_loader, data_loader.num_batches)
+            train_num_samples = args.num_samples_per_epoch
+            resampled = args.resampled
+        data_loader_info = wds.get_wds_dataset(wds_args, transform, True)
+        data_loader = DataLoaderWithLen(data_loader_info.dataloader, data_loader_info.dataloader.num_batches)
     if args.dataset != "wds":
         print(f"Data loaded: there are {len(dataset)} images.")
     # ============ building student and teacher networks ... ============
@@ -352,7 +350,8 @@ def train_dino(args):
     print("Starting DINO training !")
     for epoch in range(start_epoch, args.epochs):
         if args.dataset == "wds":
-            os.environ['WDS_EPOCH'] = str(epoch)
+            data_loader_info.set_epoch(epoch)
+            #os.environ['WDS_EPOCH'] = str(epoch)
         else:
             if hasattr(data_loader.sampler, "set_epoch"):
                 data_loader.sampler.set_epoch(epoch)
@@ -397,7 +396,7 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
     for it, data in enumerate(metric_logger.log_every(data_loader, 10, header)):
 
         if args.dataset == "wds":
-            images = data[0:-1]
+            images = data
         else:
             images, _ = data
         ### DEBUG
