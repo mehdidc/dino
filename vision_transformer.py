@@ -208,10 +208,11 @@ class VisionTransformer(nn.Module):
         return self.pos_drop(x)
 
     def forward(self, x):
-        if self.grad_checkpointing:
-            x = checkpoint(self.prepare_tokens, x)
-        else:
-            x = self.prepare_tokens(x)
+        # if self.grad_checkpointing:
+            # x = checkpoint(self.prepare_tokens, x)
+        # else:
+        # x.requires_grad = True
+        x = self.prepare_tokens(x)
         for blk in self.blocks:
             if self.grad_checkpointing:
                 x = checkpoint(blk, x)
