@@ -164,6 +164,7 @@ def train_dino(args):
         args.global_crops_scale,
         args.local_crops_scale,
         args.local_crops_number,
+        resize_local=args.grad_checkpointing,
     )
     if args.dataset == "image_folder":
         dataset = datasets.ImageFolder(args.data_path, transform=transform)
@@ -278,8 +279,8 @@ def train_dino(args):
         # teacher_without_ddp and teacher are the same thing
         teacher_without_ddp = teacher
     ddp_args = {}
-    if args.grad_checkpointing:
-        ddp_args["find_unused_parameters"] = True
+    # if args.grad_checkpointing:
+        # ddp_args["find_unused_parameters"] = True
     student = nn.parallel.DistributedDataParallel(student, device_ids=[args.gpu], **ddp_args)
     # teacher and student start with the same weights
     teacher_without_ddp.load_state_dict(student.module.state_dict())
@@ -528,7 +529,7 @@ class DINOLoss(nn.Module):
 
 
 class DataAugmentationDINO(object):
-    def __init__(self, global_crops_scale, local_crops_scale, local_crops_number, stack=False):
+    def __init__(self, global_crops_scale, local_crops_scale, local_crops_number, stack=False, resize_local=False):
         flip_and_color_jitter = transforms.Compose([
             transforms.RandomHorizontalFlip(p=0.5),
             transforms.RandomApply(
@@ -552,6 +553,7 @@ class DataAugmentationDINO(object):
         # second global crop
         self.global_transfo2 = transforms.Compose([
             transforms.RandomResizedCrop(224, scale=global_crops_scale, interpolation=Image.BICUBIC),
+            transforms.Resize(224),
             flip_and_color_jitter,
             utils.GaussianBlur(0.1),
             utils.Solarization(0.2),
@@ -559,12 +561,22 @@ class DataAugmentationDINO(object):
         ])
         # transformation for the local small crops
         self.local_crops_number = local_crops_number
-        self.local_transfo = transforms.Compose([
-            transforms.RandomResizedCrop(96, scale=local_crops_scale, interpolation=Image.BICUBIC),
-            flip_and_color_jitter,
-            utils.GaussianBlur(p=0.5),
-            normalize,
-        ])
+        if resize_local:
+            fns = [
+                transforms.RandomResizedCrop(96, scale=local_crops_scale, interpolation=Image.BICUBIC),
+                transforms.Resize(224),
+                flip_and_color_jitter,
+                utils.GaussianBlur(p=0.5),
+                normalize,
+            ]
+        else:
+            fns = [
+                transforms.RandomResizedCrop(96, scale=local_crops_scale, interpolation=Image.BICUBIC),
+                flip_and_color_jitter,
+                utils.GaussianBlur(p=0.5),
+                normalize,
+            ]
+        self.local_transfo = transforms.Compose(fns)
         self.stack = stack
 
     def __call__(self, image):
