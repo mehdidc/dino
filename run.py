@@ -70,13 +70,17 @@ def train(
     warmup_epochs:int=None,
     warmup_teacher_temp_epochs:int=None,
     grad_checkpointing=False,
+    old=False
 ):
     os.makedirs(folder, exist_ok=True)
     #nb_runs = len(glob(os.path.join(folder, "out_*")))
     #run_id = nb_runs + 1
     output = f"{folder}/slurm-%j.out"
     error = f"{folder}/slurm-%j.err"
-    script = f"scripts/run_{machine}_ddp.sh main_dino.py"
+    if old:
+        script = f"scripts/run_{machine}_ddp_old.sh main_dino.py"
+    else:
+        script = f"scripts/run_{machine}_ddp.sh main_dino.py"
     data = datasets[dataset]
     hypers = templates[template]
     
