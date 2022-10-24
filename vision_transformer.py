@@ -218,10 +218,10 @@ class VisionTransformer(nn.Module):
                 x = checkpoint(blk, x)
             else:
                 x = blk(x)
-        if self.grad_checkpointing:
-            x = checkpoint(self.norm, x)
-        else:
-            x = self.norm(x)
+        # if self.grad_checkpointing:
+            # x = checkpoint(self.norm, x)
+        # else:
+        x = self.norm(x)
         return x[:, 0]
 
     def get_last_selfattention(self, x):
