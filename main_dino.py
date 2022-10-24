@@ -130,7 +130,7 @@ def get_args_parser():
         distributed training; see https://pytorch.org/docs/stable/distributed.html""")
     parser.add_argument("--local_rank", default=0, type=int, help="Please ignore and do not set this argument.")
     parser.add_argument("--num_batches", default=0, type=int, help="Please ignore and do not set this argument.")
-    parser.add_argument("--num_samples_per_epoch", default=0, type=int, help="Please ignore and do not set this argument.")
+    parser.add_argument("--train_num_samples", default=0, type=int, help="Please ignore and do not set this argument.")
     parser.add_argument("--label_type", default="int", type=str, help="Please ignore and do not set this argument.")
     parser.add_argument('--resampled', default=False, type=utils.bool_flag)
     parser.add_argument('--grad_checkpointing', default=False, type=utils.bool_flag)
@@ -151,7 +151,7 @@ class DataLoaderWithLen:
         return self.nb_batches
 
 def train_dino(args):
-    resampled = args.num_batches or args.num_samples_per_epoch
+    resampled = args.resampled
     utils.init_distributed_mode(args)
     if not  resampled:
         utils.fix_random_seeds(args.seed)
@@ -172,8 +172,8 @@ def train_dino(args):
         if args.num_batches:
             num_samples = args.num_batches * args.batch_size_per_gpu
             sampler = torch.utils.data.RandomSampler(dataset, replacement=True, num_samples=num_samples, generator=gen)
-        elif args.num_samples_per_epoch:
-            sampler = torch.utils.data.RandomSampler(dataset, replacement=True, num_samples=args.num_samples_per_epoch//args.world_size)
+        elif args.train_num_samples:
+            sampler = torch.utils.data.RandomSampler(dataset, replacement=True, num_samples=args.train_num_samples//args.world_size)
         else:
             sampler = torch.utils.data.DistributedSampler(dataset, shuffle=True)
 
@@ -198,8 +198,8 @@ def train_dino(args):
         if args.num_batches:
             num_samples = args.num_batches * args.batch_size_per_gpu
             sampler = torch.utils.data.RandomSampler(dataset, replacement=True, num_samples=num_samples)
-        elif args.num_samples_per_epoch:
-            sampler = torch.utils.data.RandomSampler(dataset, replacement=True, num_samples=args.num_samples_per_epoch//args.world_size)
+        elif args.train_num_samples:
+            sampler = torch.utils.data.RandomSampler(dataset, replacement=True, num_samples=args.train_num_samples//args.world_size)
         else:
             sampler = torch.utils.data.DistributedSampler(dataset, shuffle=True)
         data_loader = torch.utils.data.DataLoader(
@@ -221,8 +221,9 @@ def train_dino(args):
             workers = args.num_workers
             world_size = args.world_size
             rank = args.rank
-            train_num_samples = args.num_samples_per_epoch
+            train_num_samples = args.train_num_samples
             resampled = args.resampled
+            seed = args.seed
         data_loader_info = wds.get_wds_dataset(wds_args, transform, True)
         data_loader = DataLoaderWithLen(data_loader_info.dataloader, data_loader_info.dataloader.num_batches)
     if args.dataset != "wds":
