@@ -6,7 +6,7 @@ from subprocess import call
 machine = open("/etc/FZJ/systemname").read().strip()
 datasets = {
     "imagenet1k": '--data_path "/p/scratch/ccstdl/cherti1/imagenet-1K-lmdb/train" --label_type int --dataset caffe_lmdb',
-    "imagenet1k_wds": '--data_path "datasets/imagenet-1K/webdataset/train" --dataset wds',
+    "imagenet1k_wds": '--data_path "datasets/imagenet-1K/webdataset/train" --dataset wds --train_num_samples 1281167',
     "imagenet1k_wds_replacement": '--data_path "datasets/imagenet-1K/webdataset/train" --dataset wds --resampled True',
 
     "imagenet21k": '--dataset caffe_lmdb_multiple --data_path datasets/imagenet-21K/lmdb',
